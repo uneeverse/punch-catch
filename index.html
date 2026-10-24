@@ -60,7 +60,9 @@ const CONFIG = {
   START_HEARTS: 3,               // 시작 하트 수
   INVINCIBLE_TIME: 1.0,          // 정크푸드를 받은 뒤 무적 시간(초)
   TIME_WARNING: 10,              // 남은 시간이 이 값 이하이면 빨간색으로 표시
-  RESTART_DELAY: 0.8,            // 게임 종료 직후 실수로 다시 시작하지 않게 기다리는 시간(초)
+  RESTART_DELAY: 0.8,            // 결과 화면이 나온 직후 실수로 버튼을 누르지 않게 기다리는 시간(초)
+  COUNTDOWN_TIME: 3,             // 시작 전 카운트다운(초) (PRD 3항)
+  START_FLASH_TIME: 0.6,         // 카운트다운 뒤 START! 표시 시간(초)
 
   // 충돌 판정 상자 크기: 그림 크기의 80% (억울한 판정을 줄임, PRD 7항 F3)
   HITBOX_RATIO: 0.8,
@@ -99,6 +101,10 @@ const CONFIG = {
     post: '#B0BEC5',
     postDark: '#607D8B',
     accent: '#FFC107',
+    accentDark: '#C79100',
+    button: '#33465F',
+    buttonDark: '#22314A',
+    buttonText: '#1A1220',
     warning: '#FF5252',
     text: '#FFFFFF',
     textShadow: '#0B1018',
@@ -147,6 +153,17 @@ const Input = {
     const rect = canvas.getBoundingClientRect();
     return (clientX - rect.left) / scale;
   },
+  toLogicalY(clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return (clientY - rect.top) / scale;
+  },
+
+  // 눌린 키와 손가락을 모두 해제 (화면 전환·창 이동 시)
+  reset() {
+    this.keys.left = this.keys.right = false;
+    this.pointerId = null;
+    this.dragging = false;
+  },
 
   // -1(왼쪽), 0(정지), 1(오른쪽): 키보드 또는 탭 이동 방향
   holdDirection() {
@@ -159,8 +176,12 @@ const Input = {
   init() {
     canvas.addEventListener('pointerdown', (e) => {
       if (this.pointerId !== null) return;   // 첫 번째 손가락만 사용
+      const x = this.toLogicalX(e.clientX);
+      const y = this.toLogicalY(e.clientY);
+      if (UI.press(x, y)) return;            // 버튼을 눌렀으면 이동 입력으로 쓰지 않음
+      if (!canMove()) return;
       this.pointerId = e.pointerId;
-      this.startX = this.pointerX = this.toLogicalX(e.clientX);
+      this.startX = this.pointerX = x;
       this.dragging = false;
       canvas.setPointerCapture(e.pointerId);
     });
@@ -185,15 +206,14 @@ const Input = {
       else return;
       e.preventDefault();
     };
-    window.addEventListener('keydown', (e) => setKey(e, true));
+    window.addEventListener('keydown', (e) => {
+      if (UI.key(e.key)) { e.preventDefault(); return; }   // 화면 전환 키 (엔터·스페이스·Esc·P)
+      setKey(e, true);
+    });
     window.addEventListener('keyup', (e) => setKey(e, false));
 
     // 다른 창으로 이동하면 눌린 키를 모두 해제 (키가 눌린 채로 남는 문제 방지)
-    window.addEventListener('blur', () => {
-      this.keys.left = this.keys.right = false;
-      this.pointerId = null;
-      this.dragging = false;
-    });
+    window.addEventListener('blur', () => this.reset());
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   },
 };
@@ -602,9 +622,31 @@ const game = {
   invincible: 0,       // 남은 무적 시간(초)
   over: false,
   endReason: '',       // 'time' 또는 'hearts'
-  overTime: 0,         // 게임이 끝난 뒤 지난 시간(초)
   caught: {},          // 아이템별 받은 개수 { jumpRope: 3, ... }
 };
+
+// ------------------------------------------------------------
+// 화면 전환 (PRD 3항, 6항, 7항 F6)
+// title → countdown → play ⇄ paused → result → countdown(다시 하기) 또는 title(처음으로)
+// ------------------------------------------------------------
+const Screen = {
+  state: 'title',
+  time: 0,             // 현재 화면에 들어온 뒤 지난 시간(초)
+  playTime: 0,         // 플레이를 시작한 뒤 지난 시간(초, 일시정지 제외)
+};
+
+function setScreen(state) {
+  Screen.state = state;
+  Screen.time = 0;
+  // 메뉴 화면으로 바뀌면 누르고 있던 입력을 놓은 것으로 처리
+  // (카운트다운 → 플레이는 드래그를 이어서 할 수 있게 유지)
+  if (!canMove()) Input.reset();
+}
+
+// 캐릭터를 움직일 수 있는 화면 (카운트다운 중에도 미리 자리를 잡을 수 있다)
+function canMove() {
+  return Screen.state === 'play' || Screen.state === 'countdown';
+}
 
 function resetGame() {
   game.score = 0;
@@ -613,19 +655,39 @@ function resetGame() {
   game.invincible = 0;
   game.over = false;
   game.endReason = '';
-  game.overTime = 0;
   game.caught = {};
   items.length = 0;
   spawnTimer = 0;
   lastSpawnX = null;
   player.x = CONFIG.WIDTH / 2;
+  player.moving = false;
+  player.walkTime = 0;
+  Screen.playTime = 0;
+}
+
+function startGame() {
+  resetGame();
+  setScreen('countdown');
+}
+
+function goTitle() {
+  resetGame();
+  setScreen('title');
+}
+
+function pauseGame() {
+  if (Screen.state === 'play') setScreen('paused');
+}
+
+function resumeGame() {
+  if (Screen.state === 'paused') setScreen('play');
 }
 
 function endGame(reason) {
   game.over = true;
   game.endReason = reason;
-  game.overTime = 0;
   player.moving = false;
+  setScreen('result');
 }
 
 // 받은 아이템 처리. 정크푸드는 무적 시간에는 영향이 없다.
@@ -762,42 +824,186 @@ function drawHud() {
   drawText(game.score.toLocaleString(), CONFIG.WIDTH - margin, top + 68, 48, col.text, 'right');
 }
 
-// 임시 종료 안내. 4단계에서 정식 결과 화면으로 교체한다.
-function drawGameOver() {
+// ------------------------------------------------------------
+// UI: 화면별 버튼과 키 (PRD 6항)
+// ------------------------------------------------------------
+const GOOD_ITEMS = CONFIG.ITEMS.filter((it) => it.type === 'good');
+const BAD_ITEMS = CONFIG.ITEMS.filter((it) => it.type === 'bad');
+const BUTTON_W = 360;
+const BUTTON_H = 96;
+const centerButton = (label, y, action, primary = false) =>
+  ({ label, x: (CONFIG.WIDTH - BUTTON_W) / 2, y, w: BUTTON_W, h: BUTTON_H, action, primary });
+
+// 일시정지 버튼: HUD 점수 아래 오른쪽 (PRD 6-2항)
+const PAUSE_BUTTON = { x: CONFIG.WIDTH - 40 - 64, y: 276, w: 64, h: 64, action: pauseGame };
+const PAUSE_TOUCH_PAD = 16;   // 손가락으로 누르기 쉽게 판정 영역을 넓힘
+
+const BUTTONS = {
+  title: [centerButton('시작', 948, startGame, true)],
+  paused: [
+    centerButton('계속하기', 600, resumeGame, true),
+    centerButton('처음으로', 730, goTitle),
+  ],
+  result: [
+    centerButton('다시 하기', 900, startGame, true),
+    centerButton('처음으로', 1024, goTitle),
+  ],
+};
+
+const UI = {
+  // 결과 화면은 잠시 기다린 뒤에만 버튼이 동작한다 (플레이 중 누르던 손가락 오작동 방지)
+  buttonsReady() {
+    return Screen.state !== 'result' || Screen.time >= CONFIG.RESTART_DELAY;
+  },
+
+  // 화면을 눌렀을 때. 반환값: 이동 입력으로 쓰지 않을지 여부
+  press(x, y) {
+    if (Screen.state === 'play') {
+      const b = PAUSE_BUTTON;
+      const pad = PAUSE_TOUCH_PAD;
+      if (x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad) {
+        b.action();
+        return true;
+      }
+      return false;
+    }
+    const buttons = BUTTONS[Screen.state];
+    if (!buttons) return false;                    // 카운트다운: 이동만 가능
+    if (!this.buttonsReady()) return true;
+    const hit = buttons.find((b) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
+    if (hit) hit.action();
+    return true;                                   // 버튼 밖을 눌러도 메뉴 화면에서는 무시
+  },
+
+  // 키보드: 엔터·스페이스 = 주 버튼, Esc·P = 일시정지/계속하기. 반환값: 처리했는지 여부
+  key(key) {
+    if (key === 'Escape' || key === 'p' || key === 'P') {
+      if (Screen.state === 'play') { pauseGame(); return true; }
+      if (Screen.state === 'paused') { resumeGame(); return true; }
+      return false;
+    }
+    if (key === ' ' || key === 'Enter') {
+      const buttons = BUTTONS[Screen.state];
+      if (!buttons) return Screen.state === 'play';  // 플레이 중 스페이스로 페이지가 스크롤되지 않게
+      if (this.buttonsReady()) buttons.find((b) => b.primary).action();
+      return true;
+    }
+    return false;
+  },
+};
+
+// 도트 버튼: 모서리를 한 칸 깎은 상자 + 아래쪽 그림자 줄
+function drawButton(b) {
+  const col = CONFIG.COLORS;
+  const p = CONFIG.PIXEL;
+  const x = Math.round(b.x / p) * p;
+  const y = Math.round(b.y / p) * p;
+  const { w, h } = b;
+  const fill = b.primary ? col.accent : col.button;
+  const dark = b.primary ? col.accentDark : col.buttonDark;
+
+  ctx.fillStyle = col.textShadow;                       // 외곽선
+  ctx.fillRect(x + p, y, w - 2 * p, h);
+  ctx.fillRect(x, y + p, w, h - 2 * p);
+  ctx.fillStyle = fill;                                 // 바탕
+  ctx.fillRect(x + 2 * p, y + p, w - 4 * p, h - 2 * p);
+  ctx.fillRect(x + p, y + 2 * p, w - 2 * p, h - 4 * p);
+  ctx.fillStyle = dark;                                 // 아래쪽 입체감
+  ctx.fillRect(x + 2 * p, y + h - 3 * p, w - 4 * p, 2 * p);
+
+  ctx.font = `36px ${CONFIG.FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = b.primary ? col.buttonText : col.text;
+  ctx.fillText(b.label, x + w / 2, y + h / 2 - p);
+}
+
+function drawButtons() {
+  const buttons = BUTTONS[Screen.state];
+  if (!buttons) return;
+  ctx.globalAlpha = UI.buttonsReady() ? 1 : 0.4;
+  buttons.forEach(drawButton);
+  ctx.globalAlpha = 1;
+}
+
+// 일시정지 버튼 아이콘 (II)
+function drawPauseButton() {
+  const col = CONFIG.COLORS;
+  const p = CONFIG.PIXEL;
+  const { x, y, w, h } = PAUSE_BUTTON;
+  drawButton({ x, y, w, h, label: '', primary: false });
+  ctx.fillStyle = col.text;
+  ctx.fillRect(x + 5 * p, y + 4 * p, 2 * p, 7 * p);
+  ctx.fillRect(x + 9 * p, y + 4 * p, 2 * p, 7 * p);
+}
+
+function dim() {
+  ctx.fillStyle = CONFIG.COLORS.overlay;
+  ctx.fillRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+}
+
+// 시작 화면 (PRD 6-1항). 최고 점수는 8단계, 소리 버튼은 7단계에서 추가한다.
+function drawTitle() {
   const col = CONFIG.COLORS;
   const cx = CONFIG.WIDTH / 2;
-  ctx.fillStyle = col.overlay;
-  ctx.fillRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+  const s = Assets.sprites;
 
-  drawText('게임 종료', cx, 380, 72, col.text);
-  drawText(game.endReason === 'time' ? '시간 종료' : '하트를 모두 잃었어요', cx, 440, 32, col.accent);
-  drawText(game.score.toLocaleString() + '점', cx, 560, 88, col.text);
+  drawText('펀치 캐치', cx, 300, 104, col.accent);
+  drawText('PUNCH CATCH', cx, 356, 32, col.text);
+
+  drawText('복싱 용품은 받고,', cx, 450, 32, col.text);
+  drawText('정크푸드는 피하세요!', cx, 494, 32, col.text);
+
+  // 복싱 아이템과 점수
+  GOOD_ITEMS.forEach((def, i) => {
+    const x = 135 + i * 150;
+    const sprite = s[def.id];
+    Assets.draw(sprite, x - (sprite.width * CONFIG.PIXEL) / 2, 540);
+    drawText(def.name, x, 650, 22, col.text);
+    drawText(`+${def.score}`, x, 684, 26, col.accent);
+  });
+
+  // 정크푸드
+  BAD_ITEMS.forEach((def, i) => {
+    const sprite = s[def.id];
+    Assets.draw(sprite, 210 + i * 150 - (sprite.width * CONFIG.PIXEL) / 2, 730);
+  });
+  drawText('하트 -1', cx, 850, 26, col.warning);
+
+  drawText('드래그 · 화면 좌우 터치 · ←/→ 키', cx, 910, 22, col.text);
+}
+
+// 카운트다운 3 → 2 → 1 (PRD 3항)
+function drawCountdown() {
+  const n = Math.ceil(CONFIG.COUNTDOWN_TIME - Screen.time);
+  drawText(String(Math.max(1, n)), CONFIG.WIDTH / 2, 700, 200, CONFIG.COLORS.accent);
+  drawText('준비!', CONFIG.WIDTH / 2, 480, 40, CONFIG.COLORS.text);
+}
+
+function drawPaused() {
+  drawText('일시정지', CONFIG.WIDTH / 2, 480, 72, CONFIG.COLORS.text);
+}
+
+// 결과 화면 (PRD 6-3항). 최고 점수와 공유하기는 8단계에서 추가한다.
+function drawResult() {
+  const col = CONFIG.COLORS;
+  const cx = CONFIG.WIDTH / 2;
+
+  drawText('게임 종료', cx, 300, 72, col.text);
+  drawText(game.endReason === 'time' ? '시간 종료' : '하트를 모두 잃었어요', cx, 360, 32, col.accent);
+  drawText(game.score.toLocaleString() + '점', cx, 480, 88, col.text);
 
   // 아이템별 받은 개수
-  const goods = CONFIG.ITEMS.filter((it) => it.type === 'good');
-  const bads = CONFIG.ITEMS.filter((it) => it.type === 'bad');
-  goods.forEach((def, i) => {
-    const y = 650 + i * 52;
+  GOOD_ITEMS.forEach((def, i) => {
+    const y = 580 + i * 52;
     drawText(`${def.name} (${def.score}점)`, cx - 20, y, 30, col.text, 'right');
     drawText(`× ${game.caught[def.id] || 0}`, cx + 20, y, 30, col.text, 'left');
   });
-  const badCount = bads.reduce((sum, def) => sum + (game.caught[def.id] || 0), 0);
-  drawText('정크푸드', cx - 20, 650 + goods.length * 52, 30, col.warning, 'right');
-  drawText(`× ${badCount}`, cx + 20, 650 + goods.length * 52, 30, col.warning, 'left');
-
-  if (game.overTime >= CONFIG.RESTART_DELAY) {
-    drawText('화면을 누르면 다시 시작', cx, 1000, 32, col.accent);
-  }
+  const badCount = BAD_ITEMS.reduce((sum, def) => sum + (game.caught[def.id] || 0), 0);
+  const badY = 580 + GOOD_ITEMS.length * 52;
+  drawText('정크푸드', cx - 20, badY, 30, col.warning, 'right');
+  drawText(`× ${badCount}`, cx + 20, badY, 30, col.warning, 'left');
 }
-
-// 게임 종료 후 다시 시작 (터치·클릭·스페이스·엔터)
-function tryRestart() {
-  if (game.over && game.overTime >= CONFIG.RESTART_DELAY) resetGame();
-}
-canvas.addEventListener('pointerdown', tryRestart);
-window.addEventListener('keydown', (e) => {
-  if (e.key === ' ' || e.key === 'Enter') tryRestart();
-});
 
 function drawItems() {
   for (const it of items) {
@@ -817,17 +1023,46 @@ function render() {
   ctx.imageSmoothingEnabled = false;
 
   ctx.drawImage(background, 0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+  const state = Screen.state;
 
+  // 시작 화면: 어둡게 덮은 링 위에 캐릭터만 밝게 보여 준다
+  if (state === 'title') {
+    dim();
+    drawPlayer();
+    drawTitle();
+    drawButtons();
+    return;
+  }
+
+  drawPlayer();
+  // 결과 화면은 점수를 따로 보여 주므로 HUD·아이템이 제목 뒤에 비치지 않게 생략
+  if (state !== 'result') {
+    drawItems();   // 받는 순간 캐릭터 앞에 보이도록 아이템을 나중에 그림
+    drawHud();
+  }
+
+  if (state === 'play') {
+    drawPauseButton();
+    if (Screen.playTime < CONFIG.START_FLASH_TIME) {
+      drawText('START!', CONFIG.WIDTH / 2, 700, 120, CONFIG.COLORS.accent);
+    }
+  } else if (state === 'countdown') {
+    drawCountdown();
+  } else {
+    dim();
+    if (state === 'paused') drawPaused();
+    else drawResult();
+    drawButtons();
+  }
+}
+
+function drawPlayer() {
   Assets.drawShadow(player.x, player.y, 24);
   // 무적 시간에는 0.1초 간격으로 깜빡임 (PRD 4-1항)
   const blinkOff = game.invincible > 0 && Math.floor(game.invincible * 10) % 2 === 0;
   if (!blinkOff) {
     Assets.draw(currentPlayerSprite(), player.x - player.w / 2, player.y - player.h);
   }
-  drawItems();   // 받는 순간 캐릭터 앞에 보이도록 아이템을 나중에 그림
-  drawHud();
-
-  if (game.over) drawGameOver();
 }
 
 // ============================================================
@@ -835,20 +1070,28 @@ function render() {
 // ============================================================
 let lastTime = performance.now();
 
-function loop(now) {
-  // 탭 전환 등으로 오래 멈췄다 돌아와도 캐릭터가 순간이동하지 않게 dt 상한
-  const dt = Math.min(0.05, (now - lastTime) / 1000);
-  lastTime = now;
-
-  if (game.over) {
-    game.overTime += dt;
-  } else {
+function update(dt) {
+  Screen.time += dt;
+  if (Screen.state === 'countdown') {
+    updatePlayer(dt);
+    if (Screen.time >= CONFIG.COUNTDOWN_TIME) setScreen('play');
+  } else if (Screen.state === 'play') {
+    Screen.playTime += dt;
     updateTimer(dt);
     if (!game.over) {
       updatePlayer(dt);
       updateItems(dt);
     }
   }
+  // title·paused·result: 게임 시간이 흐르지 않는다
+}
+
+function loop(now) {
+  // 탭 전환 등으로 오래 멈췄다 돌아와도 캐릭터가 순간이동하지 않게 dt 상한
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+
+  update(dt);
   render();
   requestAnimationFrame(loop);
 }
