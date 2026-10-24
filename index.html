@@ -85,6 +85,12 @@ const CONFIG = {
   LEVEL_DURATION: 15,
   LEVEL_UP_TIME: 1.2,            // LEVEL UP! 표시 시간(초)
 
+  // 소리 (PRD 7-2항)
+  SFX_VOLUME: 0.7,               // 효과음 크기 (0~1)
+  BGM_VOLUME: 0.22,              // 배경음악 크기 (0~1)
+  BGM_BPM: 132,                  // 배경음악 빠르기
+  STORAGE_MUTED: 'punchCatch.muted',   // 소리 끄기 설정을 저장하는 localStorage 키
+
   // 연출 (PRD 8-3항)
   POPUP_TIME: 0.8,               // 점수 팝업이 떠 있는 시간(초)
   POPUP_RISE: 80,                // 점수 팝업이 떠오르는 높이(논리 px)
@@ -189,6 +195,7 @@ const Input = {
 
   init() {
     canvas.addEventListener('pointerdown', (e) => {
+      Sound.unlock();                        // 브라우저 정책: 첫 터치 뒤에만 소리가 난다
       if (this.pointerId !== null) return;   // 첫 번째 손가락만 사용
       const x = this.toLogicalX(e.clientX);
       const y = this.toLogicalY(e.clientY);
@@ -221,6 +228,7 @@ const Input = {
       e.preventDefault();
     };
     window.addEventListener('keydown', (e) => {
+      Sound.unlock();
       if (UI.key(e.key)) { e.preventDefault(); return; }   // 화면 전환 키 (엔터·스페이스·Esc·P)
       setKey(e, true);
     });
@@ -228,6 +236,8 @@ const Input = {
 
     // 다른 창으로 이동하면 눌린 키를 모두 해제 (키가 눌린 채로 남는 문제 방지)
     window.addEventListener('blur', () => this.reset());
+    // iOS Safari는 손을 뗄 때(touchend)에만 소리를 허용하는 경우가 있다
+    window.addEventListener('touchend', () => Sound.unlock());
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   },
 };
@@ -705,6 +715,7 @@ function resetGame() {
 
 function startGame() {
   resetGame();
+  Sound.restartBgm();
   setScreen('countdown');
 }
 
@@ -726,6 +737,7 @@ function endGame(reason) {
   game.endReason = reason;
   player.moving = false;
   setScreen('result');
+  Sound.play('end', reason);
 }
 
 // 받은 아이템 처리. 정크푸드는 무적 시간에는 영향이 없다.
@@ -758,6 +770,7 @@ function updateLevel(dt) {
     game.levelIndex = index;
     level = CONFIG.LEVELS[index];
     game.levelUpTimer = CONFIG.LEVEL_UP_TIME;
+    Sound.play('levelUp');
   }
 }
 
@@ -829,6 +842,8 @@ function updateItems(dt) {
     if (overlaps(playerBox, hitbox(it.x, it.y, it.w, it.h))) {
       if (catchItem(it.def)) {
         Effects.onCatch(it);
+        if (it.def.type === 'good') Sound.play('catch', it.def.score);
+        else Sound.play('hit');
         items.splice(i, 1);
       }
       if (game.over) return;            // 마지막 하트를 잃으면 바로 멈춤
@@ -929,6 +944,193 @@ const Effects = {
 };
 
 // ============================================================
+// Sound: 효과음·배경음악 (PRD 7-2항)
+// 음원 파일 없이 Web Audio로 소리를 직접 만든다. 나중에 mp3로 바꿀 때는
+// SFX의 함수만 "버퍼를 재생"하도록 바꾸면 된다.
+// ============================================================
+const Sound = {
+  ctx: null,           // AudioContext (첫 터치 뒤에 만든다)
+  master: null,        // 전체 음량 (소리 끄기는 여기서 0으로)
+  sfxBus: null,
+  bgmBus: null,
+  noiseBuffer: null,   // 타악기용 백색소음
+  muted: false,
+  bgmPlaying: false,
+  bgmStep: 0,          // 배경음악 현재 16분음표 위치
+  bgmNextTime: 0,      // 다음 음을 예약할 시각(AudioContext 시간)
+
+  // 저장된 소리 설정 읽기. 사생활 보호 모드 등에서 실패해도 게임은 계속된다.
+  loadSetting() {
+    try { this.muted = localStorage.getItem(CONFIG.STORAGE_MUTED) === '1'; } catch (e) { /* 무시 */ }
+  },
+
+  // 첫 터치·클릭·키 입력 때 호출: 오디오를 만들고 깨운다
+  unlock() {
+    if (!this.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;                 // 소리를 지원하지 않는 브라우저: 소리 없이 진행
+      const ac = new AC();
+      this.ctx = ac;
+      this.master = ac.createGain();
+      this.master.gain.value = this.muted ? 0 : 1;
+      this.master.connect(ac.destination);
+      this.sfxBus = ac.createGain();
+      this.sfxBus.gain.value = CONFIG.SFX_VOLUME;
+      this.sfxBus.connect(this.master);
+      this.bgmBus = ac.createGain();
+      this.bgmBus.gain.value = CONFIG.BGM_VOLUME;
+      this.bgmBus.connect(this.master);
+      // 1초 길이 백색소음 (스네어·하이햇·피격음에 재사용)
+      this.noiseBuffer = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+      const data = this.noiseBuffer.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    }
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+  },
+
+  // 깨우는 중(suspended)에도 예약해 두면 깨어난 뒤 재생된다 (첫 "3" 소리가 빠지지 않게)
+  ready() {
+    return this.ctx !== null && this.ctx.state !== 'closed';
+  },
+
+  toggle() {
+    this.muted = !this.muted;
+    try { localStorage.setItem(CONFIG.STORAGE_MUTED, this.muted ? '1' : '0'); } catch (e) { /* 무시 */ }
+    if (this.master) this.master.gain.setValueAtTime(this.muted ? 0 : 1, this.ctx.currentTime);
+    if (!this.muted) this.play('click');
+  },
+
+  // 효과음 재생. name은 SFX의 이름, arg는 추가 정보(예: 아이템 점수)
+  play(name, arg) {
+    if (this.muted || !this.ready()) return;
+    try {
+      SFX[name](this.ctx.currentTime + 0.01, arg);
+    } catch (e) {
+      console.warn('효과음 오류', name, e);   // 소리 오류로 게임이 멈추지 않게
+    }
+  },
+
+  // 음 하나: 주파수(끝 주파수로 미끄러짐 가능), 파형, 길이, 크기
+  tone(start, { freq, to, dur, type = 'square', vol = 0.3, bus = this.sfxBus }) {
+    const ac = this.ctx;
+    const osc = ac.createOscillator();
+    const g = ac.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, start);
+    if (to) osc.frequency.exponentialRampToValueAtTime(to, start + dur);
+    g.gain.setValueAtTime(0.0001, start);
+    g.gain.exponentialRampToValueAtTime(vol, start + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+    osc.connect(g);
+    g.connect(bus);
+    osc.start(start);
+    osc.stop(start + dur + 0.02);
+  },
+
+  // 잡음 하나: 필터로 음색을 바꾼다 (highpass = 치익, bandpass = 탁)
+  noise(start, { dur, vol = 0.3, filter = 'highpass', freq = 6000, bus = this.sfxBus }) {
+    const ac = this.ctx;
+    const src = ac.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const f = ac.createBiquadFilter();
+    f.type = filter;
+    f.frequency.value = freq;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(vol, start);
+    g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+    src.connect(f);
+    f.connect(g);
+    g.connect(bus);
+    src.start(start);
+    src.stop(start + dur + 0.02);
+  },
+
+  // 매 프레임 호출: 플레이 중이면 배경음악을 조금 앞까지 미리 예약한다
+  update(wantBgm) {
+    if (!wantBgm || this.muted || !this.ready()) {
+      this.bgmPlaying = false;
+      return;
+    }
+    const now = this.ctx.currentTime;
+    // 새로 시작했거나 (탭 전환 등으로) 예약이 크게 밀렸으면 지금부터 다시 맞춘다
+    if (!this.bgmPlaying || this.bgmNextTime < now - 0.1) this.bgmNextTime = now + 0.05;
+    this.bgmPlaying = true;
+    const stepTime = 60 / CONFIG.BGM_BPM / 4;   // 16분음표 길이(초)
+    while (this.bgmNextTime < now + 0.15) {
+      try { BGM.step(this.bgmStep, this.bgmNextTime); } catch (e) { console.warn('배경음악 오류', e); }
+      this.bgmNextTime += stepTime;
+      this.bgmStep = (this.bgmStep + 1) % BGM.LENGTH;
+    }
+  },
+
+  // 새 판을 시작하면 배경음악을 처음 박자부터
+  restartBgm() {
+    this.bgmStep = 0;
+    this.bgmPlaying = false;
+  },
+};
+Sound.loadSetting();
+
+// 효과음 모음: (시작 시각, 추가 정보) → 소리 예약
+const SFX = {
+  // 아이템 획득: 점수가 높을수록 높은 음, 챔피언 벨트는 세 음
+  catch(t, score) {
+    const notes = { 10: [660], 20: [784], 30: [988], 50: [1047, 1319, 1568] }[score] || [660];
+    notes.forEach((freq, i) => {
+      Sound.tone(t + i * 0.06, { freq, dur: 0.12, vol: 0.25 });
+      Sound.tone(t + i * 0.06 + 0.04, { freq: freq * 2, dur: 0.08, vol: 0.1 });   // 반짝이는 윗음
+    });
+  },
+  // 정크푸드: 낮게 떨어지는 음 + 퍽 소리
+  hit(t) {
+    Sound.tone(t, { freq: 220, to: 55, dur: 0.35, type: 'sawtooth', vol: 0.3 });
+    Sound.noise(t, { dur: 0.18, vol: 0.4, filter: 'bandpass', freq: 800 });
+  },
+  // 레벨 업: 위로 올라가는 네 음
+  levelUp(t) {
+    [523, 659, 784, 1047].forEach((freq, i) => Sound.tone(t + i * 0.08, { freq, dur: 0.14, vol: 0.22 }));
+  },
+  // 카운트다운 3·2·1
+  tick(t) {
+    Sound.tone(t, { freq: 440, dur: 0.15, vol: 0.25 });
+  },
+  // START!
+  go(t) {
+    Sound.tone(t, { freq: 880, dur: 0.4, vol: 0.25 });
+    Sound.tone(t, { freq: 1320, dur: 0.4, vol: 0.1 });
+  },
+  // 게임 종료: 시간 종료는 끝맺는 세 음, 하트 0은 내려가는 세 음
+  end(t, reason) {
+    const notes = reason === 'time' ? [784, 659, 1047] : [523, 415, 330];
+    notes.forEach((freq, i) => Sound.tone(t + i * 0.16, { freq, dur: i === 2 ? 0.5 : 0.15, type: 'triangle', vol: 0.35 }));
+  },
+  // 버튼 누름
+  click(t) {
+    Sound.tone(t, { freq: 1200, dur: 0.05, vol: 0.15 });
+  },
+};
+
+// 배경음악: 2마디(16분음표 32칸) 반복 비트. 킥·스네어·하이햇과 베이스 (복싱 체육관 느낌)
+const BGM = {
+  LENGTH: 32,
+  KICK: [0, 8, 10, 16, 24, 30],
+  SNARE: [4, 12, 20, 28],
+  // 8분음표마다 베이스 음 (0은 쉼), A단조
+  BASS: [110, 0, 110, 131, 110, 0, 147, 131, 110, 0, 110, 131, 98, 0, 165, 147],
+
+  step(i, t) {
+    const bus = Sound.bgmBus;
+    if (this.KICK.includes(i)) Sound.tone(t, { freq: 150, to: 40, dur: 0.18, type: 'sine', vol: 0.9, bus });
+    if (this.SNARE.includes(i)) Sound.noise(t, { dur: 0.12, vol: 0.45, filter: 'bandpass', freq: 1800, bus });
+    if (i % 2 === 0) Sound.noise(t, { dur: 0.04, vol: i % 4 === 2 ? 0.25 : 0.12, filter: 'highpass', freq: 7000, bus });
+    if (i % 2 === 0) {
+      const freq = this.BASS[i / 2];
+      if (freq) Sound.tone(t, { freq, dur: 0.1, type: 'square', vol: 0.18, bus });
+    }
+  },
+};
+
+// ============================================================
 // 그리기
 // ============================================================
 
@@ -1000,6 +1202,17 @@ const centerButton = (label, y, action, primary = false) =>
 const PAUSE_BUTTON = { x: CONFIG.WIDTH - 40 - 64, y: 276, w: 64, h: 64, action: pauseGame };
 const PAUSE_TOUCH_PAD = 16;   // 손가락으로 누르기 쉽게 판정 영역을 넓힘
 
+// 소리 켜기/끄기 버튼 (PRD 6-1항): 시작 화면은 제목 오른쪽,
+// 일시정지 화면은 점수를 가리지 않고, 일시정지 버튼을 두 번 눌러도 잘못 눌리지 않게 버튼 아래
+const SOUND_BUTTONS = {
+  title: { x: CONFIG.WIDTH - 40 - 64, y: 196, w: 64, h: 64 },
+  paused: { x: (CONFIG.WIDTH - 64) / 2, y: 860, w: 64, h: 64 },
+};
+
+// 판정 영역을 pad만큼 넓혀서 눌렀는지 확인
+const inRect = (b, x, y, pad = 0) =>
+  x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad;
+
 const BUTTONS = {
   title: [centerButton('시작', 948, startGame, true)],
   paused: [
@@ -1021,24 +1234,36 @@ const UI = {
   // 화면을 눌렀을 때. 반환값: 이동 입력으로 쓰지 않을지 여부
   press(x, y) {
     if (Screen.state === 'play') {
-      const b = PAUSE_BUTTON;
-      const pad = PAUSE_TOUCH_PAD;
-      if (x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad) {
-        b.action();
+      if (inRect(PAUSE_BUTTON, x, y, PAUSE_TOUCH_PAD)) {
+        Sound.play('click');
+        PAUSE_BUTTON.action();
         return true;
       }
       return false;
     }
+    const soundButton = SOUND_BUTTONS[Screen.state];
+    if (soundButton && inRect(soundButton, x, y, PAUSE_TOUCH_PAD)) {
+      Sound.toggle();
+      return true;
+    }
     const buttons = BUTTONS[Screen.state];
     if (!buttons) return false;                    // 카운트다운: 이동만 가능
     if (!this.buttonsReady()) return true;
-    const hit = buttons.find((b) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
-    if (hit) hit.action();
+    const hit = buttons.find((b) => inRect(b, x, y));
+    if (hit) {
+      Sound.play('click');
+      hit.action();
+    }
     return true;                                   // 버튼 밖을 눌러도 메뉴 화면에서는 무시
   },
 
-  // 키보드: 엔터·스페이스 = 주 버튼, Esc·P = 일시정지/계속하기. 반환값: 처리했는지 여부
+  // 키보드: 엔터·스페이스 = 주 버튼, Esc·P = 일시정지/계속하기, M = 소리 켜기/끄기.
+  // 반환값: 처리했는지 여부
   key(key) {
+    if (key === 'm' || key === 'M') {
+      Sound.toggle();
+      return true;
+    }
     if (key === 'Escape' || key === 'p' || key === 'P') {
       if (Screen.state === 'play') { pauseGame(); return true; }
       if (Screen.state === 'paused') { resumeGame(); return true; }
@@ -1047,7 +1272,10 @@ const UI = {
     if (key === ' ' || key === 'Enter') {
       const buttons = BUTTONS[Screen.state];
       if (!buttons) return Screen.state === 'play';  // 플레이 중 스페이스로 페이지가 스크롤되지 않게
-      if (this.buttonsReady()) buttons.find((b) => b.primary).action();
+      if (this.buttonsReady()) {
+        Sound.play('click');
+        buttons.find((b) => b.primary).action();
+      }
       return true;
     }
     return false;
@@ -1097,6 +1325,30 @@ function drawPauseButton() {
   ctx.fillStyle = col.text;
   ctx.fillRect(x + 5 * p, y + 4 * p, 2 * p, 7 * p);
   ctx.fillRect(x + 9 * p, y + 4 * p, 2 * p, 7 * p);
+}
+
+// 소리 켜기/끄기 버튼: 스피커 + 음파(켜짐) 또는 X(꺼짐)
+function drawSoundButton() {
+  const col = CONFIG.COLORS;
+  const p = CONFIG.PIXEL;
+  const { x, y, w, h } = SOUND_BUTTONS[Screen.state];
+  drawButton({ x, y, w, h, label: '', primary: false });
+  const px = (cx, cy, cw = 1, ch = 1) => ctx.fillRect(x + cx * p, y + cy * p, cw * p, ch * p);
+  ctx.fillStyle = col.text;
+  px(3, 6, 2, 3);            // 스피커 몸통
+  px(5, 5, 1, 5);
+  px(6, 4, 1, 7);            // 스피커 나팔
+  if (Sound.muted) {
+    ctx.fillStyle = col.warning;
+    for (let i = 0; i < 4; i++) {
+      px(9 + i, 5 + i);      // X
+      px(12 - i, 5 + i);
+    }
+  } else {
+    px(8, 6, 1, 3);          // 작은 음파
+    px(10, 5, 1, 5);         // 큰 음파
+    px(9, 4); px(9, 10);
+  }
 }
 
 function dim() {
@@ -1235,6 +1487,7 @@ function renderScene(state) {
     drawPlayer();
     drawTitle();
     drawButtons();
+    drawSoundButton();
     return;
   }
 
@@ -1262,6 +1515,7 @@ function renderScene(state) {
     if (state === 'paused') drawPaused();
     else drawResult();
     drawButtons();
+    if (state === 'paused') drawSoundButton();
   }
 }
 
@@ -1282,10 +1536,17 @@ function drawPlayer() {
 let lastTime = performance.now();
 
 function update(dt) {
+  const prevTime = Screen.time;
   Screen.time += dt;
   if (Screen.state === 'countdown') {
     updatePlayer(dt);
-    if (Screen.time >= CONFIG.COUNTDOWN_TIME) setScreen('play');
+    if (Screen.time >= CONFIG.COUNTDOWN_TIME) {
+      setScreen('play');
+      Sound.play('go');
+    } else if (prevTime === 0 ||
+        Math.ceil(CONFIG.COUNTDOWN_TIME - prevTime) !== Math.ceil(CONFIG.COUNTDOWN_TIME - Screen.time)) {
+      Sound.play('tick');   // 화면의 숫자가 3 → 2 → 1로 바뀌는 순간
+    }
   } else if (Screen.state === 'play') {
     Screen.playTime += dt;
     updateTimer(dt);
@@ -1305,6 +1566,7 @@ function loop(now) {
   lastTime = now;
 
   update(dt);
+  Sound.update(Screen.state === 'play');   // 배경음악은 플레이 중에만
   render();
   requestAnimationFrame(loop);
 }
