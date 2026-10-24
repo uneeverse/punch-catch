@@ -127,6 +127,13 @@ const CONFIG = {
   SHARE_CARD_SIZE: 720,          // 공유용 결과 카드 이미지 크기(정사각형, px)
   MESSAGE_TIME: 1.8,             // "복사했어요" 같은 안내 문구 표시 시간(초)
 
+  // 카카오톡 공유 (카카오 JavaScript SDK). 키가 비어 있으면 카카오톡 버튼을 숨긴다.
+  // 키는 카카오 개발자 콘솔 [앱] > [플랫폼 키] > [JavaScript 키]에서 복사한다.
+  // JavaScript 키는 웹 페이지에 그대로 노출되는 공개 키이며, 등록한 도메인에서만 동작한다.
+  KAKAO_JS_KEY: '5844a4801ed24b78c4749b3b0ab49f42',
+  KAKAO_SDK_URL: 'https://t1.kakaocdn.net/kakao_js_sdk/2.8.4/kakao.min.js',
+  KAKAO_SDK_INTEGRITY: 'sha384-BGX7Wb16GmRFagri4bLJV2DgipVZaU2AI812GZtHtHzzDQJnfHasDXN5houxv45w',
+
   // 연출 (PRD 8-3항)
   POPUP_TIME: 0.8,               // 점수 팝업이 떠 있는 시간(초)
   POPUP_RISE: 80,                // 점수 팝업이 떠오르는 높이(논리 px)
@@ -1234,16 +1241,19 @@ Record.load();
 const Share = {
   card: null,          // 결과 카드 캔버스
   file: null,          // 공유용 PNG 파일 (만드는 중이면 null)
-  panelOpen: false,    // 이미지 저장·문구 복사 선택 창
+  fileFailed: false,   // PNG 파일을 만들지 못함
+  panelOpen: false,    // 카카오톡·이미지 저장·문구 복사 선택 창
   message: '',         // 잠깐 보여 줄 안내 문구
   messageTime: 0,
 
   reset() {
     this.card = null;
     this.file = null;
+    this.fileFailed = false;
     this.panelOpen = false;
     this.message = '';
     this.messageTime = 0;
+    KakaoShare.reset();
   },
 
   // 게임 주소 (내 PC에서 파일로 연 경우에는 다른 사람이 열 수 없으므로 넣지 않는다)
@@ -1265,13 +1275,19 @@ const Share = {
     this.reset();
     this.card = drawShareCard();
     try {
-      this.card.toBlob((blob) => {
-        if (!blob || this.card === null) return;   // 그 사이 새 판을 시작했으면 버림
+      const card = this.card;
+      card.toBlob((blob) => {
+        if (card !== this.card) return;   // 그 사이 새 판을 시작했으면 버림
+        if (!blob) { this.fileFailed = true; return; }
         try {
           this.file = new File([blob], this.fileName(), { type: 'image/png' });
-        } catch (e) { /* File을 만들 수 없는 브라우저: 선택 창으로 대신한다 */ }
+        } catch (e) {
+          this.fileFailed = true;   // File을 만들 수 없는 브라우저: 선택 창으로 대신한다
+        }
       }, 'image/png');
-    } catch (e) { /* 무시 */ }
+    } catch (e) {
+      this.fileFailed = true;
+    }
   },
 
   canShareFile() {
@@ -1282,12 +1298,22 @@ const Share = {
     }
   },
 
-  // 공유하기 버튼
+  // 공유하기 버튼: 카카오톡 공유를 쓸 수 있으면 선택 창을 먼저 띄운다
   open() {
+    if (KakaoShare.available()) {
+      this.panelOpen = true;
+      KakaoShare.upload();   // 카카오톡 버튼을 누르기 전에 결과 카드를 미리 올려 둔다
+      return;
+    }
     if (!this.canShareFile()) {
       this.panelOpen = true;
       return;
     }
+    this.nativeShare();
+  },
+
+  // 기기 기본 공유 창 (이미지 + 문구)
+  nativeShare() {
     navigator.share({ files: [this.file], title: '펀치 캐치', text: this.text() })
       .catch((e) => {
         if (e && e.name === 'AbortError') return;   // 사용자가 공유 창을 닫음
@@ -1350,6 +1376,117 @@ const Share = {
     this.messageTime = Math.max(0, this.messageTime - dt);
   },
 };
+
+// ============================================================
+// KakaoShare: 카카오톡 공유 (카카오 JavaScript SDK, Kakao.Share.sendDefault)
+// 결과 카드를 카카오 서버에 올리고(uploadImage, 100일 보관) 피드 메시지로 보낸다.
+// 이미지를 올리지 못했으면 문구와 링크만 있는 텍스트 메시지로 보낸다.
+// ============================================================
+const KakaoShare = {
+  status: 'off',       // off(키 없음·파일로 엶) | loading | ready | failed
+  imageUrl: null,      // 올린 결과 카드 주소
+  uploading: false,
+  uploadFailed: false,
+  round: 0,            // 새 판을 시작하면 늘어난다 (이전 판의 업로드 결과를 버리기 위해)
+
+  // SDK는 키가 있고 http(s)로 열었을 때만 불러온다 (내 PC 파일에서는 카카오 API가 동작하지 않음)
+  load() {
+    if (!CONFIG.KAKAO_JS_KEY || !Share.link()) return;
+    this.status = 'loading';
+    const script = document.createElement('script');
+    script.src = CONFIG.KAKAO_SDK_URL;
+    script.integrity = CONFIG.KAKAO_SDK_INTEGRITY;
+    script.crossOrigin = 'anonymous';
+    script.onload = () => {
+      try {
+        if (!window.Kakao.isInitialized()) window.Kakao.init(CONFIG.KAKAO_JS_KEY);
+        this.status = window.Kakao.isInitialized() ? 'ready' : 'failed';
+      } catch (e) {
+        this.status = 'failed';
+        console.warn('카카오 SDK 초기화 오류', e);
+      }
+    };
+    script.onerror = () => { this.status = 'failed'; };
+    document.head.appendChild(script);
+  },
+
+  available() {
+    return this.status === 'ready';
+  },
+
+  reset() {
+    this.round++;
+    this.imageUrl = null;
+    this.uploading = false;
+    this.uploadFailed = false;
+  },
+
+  upload() {
+    if (!this.available() || this.imageUrl || this.uploading) return;
+    if (!Share.file) {
+      // 카드 PNG를 아직 만드는 중이면 잠시 뒤 다시 시도
+      if (!Share.fileFailed) setTimeout(() => { if (Share.panelOpen) this.upload(); }, 200);
+      return;
+    }
+    const round = this.round;
+    this.uploading = true;
+    this.uploadFailed = false;
+    window.Kakao.Share.uploadImage({ file: [Share.file] })
+      .then((res) => {
+        if (round !== this.round) return;
+        this.imageUrl = res.infos.original.url;
+      })
+      .catch((e) => {
+        if (round !== this.round) return;
+        this.uploadFailed = true;
+        console.warn('카카오 이미지 업로드 오류', e);
+      })
+      .finally(() => {
+        if (round === this.round) this.uploading = false;
+      });
+  },
+
+  // 카카오톡 공유 버튼
+  send() {
+    if (!this.available()) return;
+    // 결과 카드를 아직 준비하는 중이면 잠시 기다리게 한다
+    const imageFailed = this.uploadFailed || Share.fileFailed;
+    if (!this.imageUrl && !imageFailed) {
+      Share.show('이미지를 준비하고 있어요');
+      this.upload();
+      return;
+    }
+    const link = Share.link();
+    const linkObj = { mobileWebUrl: link, webUrl: link };
+    try {
+      if (this.imageUrl) {
+        window.Kakao.Share.sendDefault({
+          objectType: 'feed',
+          content: {
+            title: `펀치 캐치 ${game.score.toLocaleString()}점 달성! 🥊`,
+            description: '떨어지는 복싱 용품을 받고 정크푸드는 피하세요. 너도 도전해 봐!',
+            imageUrl: this.imageUrl,
+            imageWidth: CONFIG.SHARE_CARD_SIZE,
+            imageHeight: CONFIG.SHARE_CARD_SIZE,
+            link: linkObj,
+          },
+          buttons: [{ title: '나도 도전하기', link: linkObj }],
+        });
+      } else {
+        window.Kakao.Share.sendDefault({
+          objectType: 'text',
+          text: `펀치 캐치에서 ${game.score.toLocaleString()}점 달성! 🥊 너도 도전해 봐`,
+          link: linkObj,
+          buttonTitle: '나도 도전하기',
+        });
+      }
+    } catch (e) {
+      console.warn('카카오톡 공유 오류', e);
+      Share.show('카카오톡 공유를 열지 못했어요');
+    }
+  },
+};
+KakaoShare.load();
 
 // 공유용 결과 카드: 정사각형 이미지에 게임 이름, 점수, 받은 아이템 개수
 function drawShareCard() {
@@ -1468,6 +1605,9 @@ const SOUND_BUTTONS = {
 const inRect = (b, x, y, pad = 0) =>
   x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad;
 
+// 공유 선택 창 버튼 위치 (위에 카드 미리보기가 있다)
+const SHARE_BUTTON_Y = [700, 810, 920, 1030];
+
 const BUTTONS = {
   title: [centerButton('시작', 948, startGame, true)],
   paused: [
@@ -1479,17 +1619,33 @@ const BUTTONS = {
     centerButton('공유하기', 974, () => Share.open()),
     centerButton('처음으로', 1084, goTitle),
   ],
-  // 이미지 공유를 지원하지 않을 때 결과 화면 위에 뜨는 선택 창 (PRD 7-1항 3번)
+  // 결과 화면 위에 뜨는 공유 선택 창 (PRD 7-1항)
+  // 카카오톡을 쓸 수 있을 때: 카카오톡 / 다른 앱으로 공유(또는 이미지 저장) / 문구 복사 / 돌아가기
   share: [
-    centerButton('이미지 저장', 760, () => Share.download(), true),
-    centerButton('문구 복사', 870, () => Share.copy()),
-    centerButton('돌아가기', 980, () => Share.closePanel()),
+    centerButton('이미지 저장', SHARE_BUTTON_Y[0], () => Share.download(), true),
+    centerButton('문구 복사', SHARE_BUTTON_Y[1], () => Share.copy()),
+    centerButton('돌아가기', SHARE_BUTTON_Y[2], () => Share.closePanel()),
+  ],
+  shareKakao: [
+    centerButton('카카오톡 공유', SHARE_BUTTON_Y[0], () => KakaoShare.send(), true),
+    centerButton('다른 앱으로 공유', SHARE_BUTTON_Y[1], () => Share.nativeShare()),
+    centerButton('문구 복사', SHARE_BUTTON_Y[2], () => Share.copy()),
+    centerButton('돌아가기', SHARE_BUTTON_Y[3], () => Share.closePanel()),
+  ],
+  shareKakaoSave: [
+    centerButton('카카오톡 공유', SHARE_BUTTON_Y[0], () => KakaoShare.send(), true),
+    centerButton('이미지 저장', SHARE_BUTTON_Y[1], () => Share.download()),
+    centerButton('문구 복사', SHARE_BUTTON_Y[2], () => Share.copy()),
+    centerButton('돌아가기', SHARE_BUTTON_Y[3], () => Share.closePanel()),
   ],
 };
 
 // 지금 화면에서 누를 수 있는 버튼들
 function currentButtons() {
-  if (Screen.state === 'result' && Share.panelOpen) return BUTTONS.share;
+  if (Screen.state === 'result' && Share.panelOpen) {
+    if (!KakaoShare.available()) return BUTTONS.share;
+    return Share.canShareFile() ? BUTTONS.shareKakao : BUTTONS.shareKakaoSave;
+  }
   return BUTTONS[Screen.state];
 }
 
@@ -1696,12 +1852,12 @@ function drawResult() {
   drawText(`× ${badCount}`, cx + 20, badY, 28, col.warning, 'left');
 }
 
-// 공유 선택 창: 카드 미리보기 + 이미지 저장·문구 복사·돌아가기
+// 공유 선택 창: 카드 미리보기 + 카카오톡·이미지 저장·문구 복사·돌아가기
 function drawSharePanel() {
   const cx = CONFIG.WIDTH / 2;
   drawText('결과 공유', cx, 200, 56, CONFIG.COLORS.text);
   if (Share.card) {
-    const s = 440;   // 미리보기 크기
+    const s = 400;   // 미리보기 크기
     const x = cx - s / 2;
     const y = 250;
     ctx.fillStyle = CONFIG.COLORS.textShadow;
