@@ -84,6 +84,18 @@ const CONFIG = {
   // fallSpeed는 초당 화면 높이 비율. 이미 떨어지고 있는 아이템의 속도는 바뀌지 않는다.
   LEVEL_DURATION: 15,
   LEVEL_UP_TIME: 1.2,            // LEVEL UP! 표시 시간(초)
+
+  // 연출 (PRD 8-3항)
+  POPUP_TIME: 0.8,               // 점수 팝업이 떠 있는 시간(초)
+  POPUP_RISE: 80,                // 점수 팝업이 떠오르는 높이(논리 px)
+  SHAKE_TIME: 0.3,               // 정크푸드를 받았을 때 화면 흔들림 시간(초)
+  SHAKE_POWER: 12,               // 흔들림 최대 폭(논리 px)
+  HIT_FLASH_TIME: 0.25,          // 화면이 빨갛게 번쩍이는 시간(초)
+  HEART_BREAK_TIME: 0.6,         // 잃은 하트가 두 쪽으로 깨지는 시간(초)
+  PARTICLE_COUNT: 8,             // 아이템을 받을 때 튀는 도트 수
+  PARTICLE_TIME: 0.45,           // 도트가 사라지기까지 시간(초)
+  CATCH_POSE_TIME: 0.15,         // 복싱 아이템을 받은 뒤 두 팔을 든 자세 시간(초)
+
   LEVELS: [
     { fallSpeed: 0.35, spawnInterval: 0.9,  badRatio: 0.15 },
     { fallSpeed: 0.45, spawnInterval: 0.75, badRatio: 0.20 },
@@ -308,6 +320,23 @@ const LEGS_STEP = [
   '.................KKKKK......',
 ];
 
+// 받는 순간 자세: 두 글러브를 3칸 위로 뻗는다 (팔을 늘리고 머리 위는 비움). 28 × 37칸
+const CATCH_LIFT = 3;
+const PLAYER_CATCH_BODY = (() => {
+  const isArm = (x) => x <= 8 || x >= 19;   // 머리(9~18칸) 바깥은 글러브·팔
+  const armRow = PLAYER_BODY[9];            // 팔만 있는 줄
+  const top = [];
+  for (let y = 0; y < 12 + CATCH_LIFT; y++) {
+    let row = '';
+    for (let x = 0; x < armRow.length; x++) {
+      if (isArm(x)) row += y < 9 ? PLAYER_BODY[y][x] : armRow[x];
+      else row += y < CATCH_LIFT ? '.' : PLAYER_BODY[y - CATCH_LIFT][x];
+    }
+    top.push(row);
+  }
+  return [...top, ...PLAYER_BODY.slice(12)];
+})();
+
 // 떨어지는 아이템: 18 × 18칸. 나쁜 아이템은 초록 외곽선(G)으로 구분한다.
 const ITEM_ART = {
   jumpRope: [
@@ -494,6 +523,7 @@ const Assets = {
     playerStand: makeSprite([...PLAYER_BODY, ...LEGS_STAND]),
     playerStepL: makeSprite([...PLAYER_BODY, ...LEGS_STEP]),
     playerStepR: makeSprite([...PLAYER_BODY, ...LEGS_STEP], true),
+    playerCatch: makeSprite([...PLAYER_CATCH_BODY, ...LEGS_STAND]),
     heart: makeSprite(HEART_ART),
     heartEmpty: makeSprite(HEART_EMPTY_ART),
     // 아이템 그림: ITEM_ART의 이름(id) 그대로 사용
@@ -662,6 +692,7 @@ function resetGame() {
   game.caught = {};
   game.levelIndex = 0;
   game.levelUpTimer = 0;
+  Effects.reset();
   level = CONFIG.LEVELS[0];
   items.length = 0;
   spawnTimer = 0;
@@ -796,13 +827,106 @@ function updateItems(dt) {
     it.y += it.speed * dt;
 
     if (overlaps(playerBox, hitbox(it.x, it.y, it.w, it.h))) {
-      if (catchItem(it.def)) items.splice(i, 1);
+      if (catchItem(it.def)) {
+        Effects.onCatch(it);
+        items.splice(i, 1);
+      }
       if (game.over) return;            // 마지막 하트를 잃으면 바로 멈춤
     } else if (it.y > CONFIG.HEIGHT) {
       items.splice(i, 1);               // 놓친 아이템은 하트·점수 변화 없음 (PRD 4-3항)
     }
   }
 }
+
+// ------------------------------------------------------------
+// 연출: 점수 팝업, 도트 파편, 화면 흔들림, 하트 깨짐 (PRD 8-3항)
+// 플레이 중에만 시간이 흐르므로 일시정지하면 연출도 멈춘다.
+// ------------------------------------------------------------
+const Effects = {
+  popups: [],          // { text, color, x, y, time }
+  particles: [],       // { x, y, vx, vy, color, time }
+  shake: 0,            // 남은 흔들림 시간(초)
+  flash: 0,            // 남은 빨간 번쩍임 시간(초)
+  pose: 0,             // 남은 두 팔 든 자세 시간(초)
+  heartBreak: 0,       // 남은 하트 깨짐 시간(초)
+  heartIndex: -1,      // 깨지는 하트의 위치
+
+  reset() {
+    this.popups.length = 0;
+    this.particles.length = 0;
+    this.shake = this.flash = this.pose = this.heartBreak = 0;
+    this.heartIndex = -1;
+  },
+
+  // 아이템을 받은 순간 (catchItem이 처리한 경우에만 호출)
+  onCatch(it) {
+    const col = CONFIG.COLORS;
+    const good = it.def.type === 'good';
+    // 글자가 화면 밖으로 잘리지 않게 x를 안쪽으로 제한
+    const x = Math.max(80, Math.min(CONFIG.WIDTH - 80, it.x));
+    this.popups.push({
+      text: good ? `+${it.def.score}` : '하트 -1',
+      color: good ? col.accent : col.warning,
+      x,
+      y: it.y,
+      time: 0,
+    });
+    const colors = good ? [col.accent, col.text] : [col.warning, PALETTE.G];
+    for (let i = 0; i < CONFIG.PARTICLE_COUNT; i++) {
+      const angle = Math.PI * (1 + i / (CONFIG.PARTICLE_COUNT - 1));   // 위쪽 반원으로 퍼짐
+      const speed = 220 + Math.random() * 160;
+      this.particles.push({
+        x: it.x,
+        y: it.y + it.h / 2,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        color: colors[i % colors.length],
+        time: 0,
+      });
+    }
+    if (good) {
+      this.pose = CONFIG.CATCH_POSE_TIME;
+    } else {
+      this.shake = CONFIG.SHAKE_TIME;
+      this.flash = CONFIG.HIT_FLASH_TIME;
+      this.heartBreak = CONFIG.HEART_BREAK_TIME;
+      this.heartIndex = game.hearts;   // 방금 잃은 하트 (hearts는 이미 줄어든 값)
+    }
+  },
+
+  update(dt) {
+    this.shake = Math.max(0, this.shake - dt);
+    this.flash = Math.max(0, this.flash - dt);
+    this.pose = Math.max(0, this.pose - dt);
+    this.heartBreak = Math.max(0, this.heartBreak - dt);
+
+    for (let i = this.popups.length - 1; i >= 0; i--) {
+      const pop = this.popups[i];
+      pop.time += dt;
+      if (pop.time >= CONFIG.POPUP_TIME) this.popups.splice(i, 1);
+    }
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const pt = this.particles[i];
+      pt.time += dt;
+      pt.vy += 900 * dt;                 // 중력
+      pt.x += pt.vx * dt;
+      pt.y += pt.vy * dt;
+      if (pt.time >= CONFIG.PARTICLE_TIME) this.particles.splice(i, 1);
+    }
+  },
+
+  // 흔들림 오프셋: 점점 약해지고, 도트 격자에 맞춘다
+  shakeOffset() {
+    if (this.shake <= 0) return { x: 0, y: 0 };
+    const p = CONFIG.PIXEL;
+    const power = CONFIG.SHAKE_POWER * (this.shake / CONFIG.SHAKE_TIME);
+    const snap = (v) => Math.round(v / p) * p;
+    return {
+      x: snap((Math.random() * 2 - 1) * power),
+      y: snap((Math.random() * 2 - 1) * power),
+    };
+  },
+};
 
 // ============================================================
 // 그리기
@@ -830,6 +954,23 @@ function drawHud() {
   for (let i = 0; i < CONFIG.START_HEARTS; i++) {
     const sprite = i < game.hearts ? Assets.sprites.heart : Assets.sprites.heartEmpty;
     Assets.draw(sprite, margin + i * (sprite.width + 2) * p, top + 12);
+  }
+  // 방금 잃은 하트: 빈 하트 위에서 두 쪽으로 갈라져 떨어진다
+  if (Effects.heartBreak > 0) {
+    const heart = Assets.sprites.heart;
+    const t = 1 - Effects.heartBreak / CONFIG.HEART_BREAK_TIME;   // 0 → 1
+    const x = margin + Effects.heartIndex * (heart.width + 2) * p;
+    const y = top + 12;
+    const half = Math.ceil(heart.width / 2);
+    const snap = (v) => Math.round(v / p) * p;
+    const spread = snap(t * 24);
+    const drop = snap(t * t * 48);
+    ctx.globalAlpha = 1 - t;
+    ctx.drawImage(heart, 0, 0, half, heart.height,
+      x - spread, y + drop, half * p, heart.height * p);
+    ctx.drawImage(heart, half, 0, heart.width - half, heart.height,
+      x + half * p + spread, y + drop, (heart.width - half) * p, heart.height * p);
+    ctx.globalAlpha = 1;
   }
   // 현재 난이도 단계 (하트 아래)
   drawText(`LEVEL ${game.levelIndex + 1}`, margin, top + 104, 24, col.accent, 'left');
@@ -1032,8 +1173,35 @@ function drawItems() {
   }
 }
 
+// 점수 팝업(위로 떠오르며 사라짐)과 도트 파편
+function drawEffects() {
+  const p = CONFIG.PIXEL;
+  for (const pt of Effects.particles) {
+    ctx.globalAlpha = 1 - pt.time / CONFIG.PARTICLE_TIME;
+    ctx.fillStyle = pt.color;
+    ctx.fillRect(Math.round(pt.x / p) * p, Math.round(pt.y / p) * p, p * 2, p * 2);
+  }
+  for (const pop of Effects.popups) {
+    const t = pop.time / CONFIG.POPUP_TIME;
+    ctx.globalAlpha = t < 0.6 ? 1 : 1 - (t - 0.6) / 0.4;    // 마지막 40%에서 흐려짐
+    const rise = CONFIG.POPUP_RISE * (1 - (1 - t) * (1 - t));  // 처음엔 빠르게, 끝에서 천천히
+    drawText(pop.text, pop.x, pop.y - rise, 40, pop.color);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// 정크푸드를 받았을 때 화면 전체가 빨갛게 번쩍임
+function drawHitFlash() {
+  if (Effects.flash <= 0) return;
+  ctx.globalAlpha = 0.35 * (Effects.flash / CONFIG.HIT_FLASH_TIME);
+  ctx.fillStyle = CONFIG.COLORS.warning;
+  ctx.fillRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+  ctx.globalAlpha = 1;
+}
+
 function currentPlayerSprite() {
   const s = Assets.sprites;
+  if (Effects.pose > 0) return s.playerCatch;
   if (!player.moving) return s.playerStand;
   const frame = Math.floor(player.walkTime / CONFIG.WALK_FRAME_TIME) % 2;
   return frame === 0 ? s.playerStepL : s.playerStepR;
@@ -1043,8 +1211,23 @@ function render() {
   // 캔버스 크기가 바뀌면 설정이 초기화되므로 매 프레임 지정
   ctx.imageSmoothingEnabled = false;
 
-  ctx.drawImage(background, 0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
   const state = Screen.state;
+
+  // 피격 흔들림: 플레이 중에만 화면 전체를 살짝 밀어서 그린다
+  const shake = state === 'play' ? Effects.shakeOffset() : { x: 0, y: 0 };
+  ctx.save();
+  if (shake.x || shake.y) {
+    ctx.fillStyle = CONFIG.COLORS.textShadow;     // 밀린 가장자리에 이전 화면이 남지 않게
+    ctx.fillRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+    ctx.translate(shake.x, shake.y);
+  }
+  ctx.drawImage(background, 0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+  renderScene(state);
+  ctx.restore();
+  if (state === 'play') drawHitFlash();
+}
+
+function renderScene(state) {
 
   // 시작 화면: 어둡게 덮은 링 위에 캐릭터만 밝게 보여 준다
   if (state === 'title') {
@@ -1059,6 +1242,7 @@ function render() {
   // 결과 화면은 점수를 따로 보여 주므로 HUD·아이템이 제목 뒤에 비치지 않게 생략
   if (state !== 'result') {
     drawItems();   // 받는 순간 캐릭터 앞에 보이도록 아이템을 나중에 그림
+    drawEffects();
     drawHud();
   }
 
@@ -1086,7 +1270,9 @@ function drawPlayer() {
   // 무적 시간에는 0.1초 간격으로 깜빡임 (PRD 4-1항)
   const blinkOff = game.invincible > 0 && Math.floor(game.invincible * 10) % 2 === 0;
   if (!blinkOff) {
-    Assets.draw(currentPlayerSprite(), player.x - player.w / 2, player.y - player.h);
+    // 두 팔 든 자세는 키가 커서 그림 높이 기준으로 발 위치를 맞춘다
+    const sprite = currentPlayerSprite();
+    Assets.draw(sprite, player.x - player.w / 2, player.y - sprite.height * CONFIG.PIXEL);
   }
 }
 
@@ -1108,6 +1294,7 @@ function update(dt) {
       updatePlayer(dt);
       updateItems(dt);
     }
+    Effects.update(dt);
   }
   // title·paused·result: 게임 시간이 흐르지 않는다
 }
