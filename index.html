@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#10161F">
+<meta name="format-detection" content="telephone=no">
 <title>펀치 캐치</title>
 <!-- 도트 글꼴: 갈무리 (SIL Open Font License 1.1) -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/galmuri@2.40.3/dist/galmuri.css">
@@ -12,9 +14,14 @@
     height: 100%;
     background: #10161F;          /* 게임 화면 바깥 여백 색 */
     overflow: hidden;
-    overscroll-behavior: none;
+    overscroll-behavior: none;    /* 당겨서 새로고침·튕김 방지 */
+    touch-action: none;           /* 게임 화면 바깥 여백에서도 확대·스크롤 방지 */
   }
   body {
+    box-sizing: border-box;
+    /* 노치·홈 표시줄에 게임 화면이 가려지지 않게 안전 영역만큼 띄운다 */
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -28,10 +35,34 @@
     touch-action: none;           /* 터치 스크롤·확대 방지 */
     image-rendering: pixelated;   /* 도트가 흐려지지 않게 */
   }
+  /* 휴대폰을 가로로 돌리면 세로로 돌려 달라는 안내를 덮는다 (태블릿·PC는 그대로 플레이) */
+  #rotate {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    background: #10161F;
+    color: #F4EFE5;
+    font-family: 'Galmuri11', monospace;
+    font-size: 20px;
+    text-align: center;
+  }
+  #rotate .icon {
+    font-size: 48px;
+    line-height: 1;
+  }
+  @media (orientation: landscape) and (pointer: coarse) and (max-height: 600px) {
+    #rotate { display: flex; }
+  }
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
+<div id="rotate"><div class="icon">📱</div><div>휴대폰을 세로로 돌려 주세요</div></div>
 
 <script>
 'use strict';
@@ -144,9 +175,21 @@ const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 let scale = 1;   // 논리 px → CSS px 배율
 
+// 안전 영역(노치·홈 표시줄)을 뺀 실제 사용 가능한 크기
+function availableSize() {
+  const st = getComputedStyle(document.body);
+  const px = (v) => parseFloat(v) || 0;
+  return {
+    w: window.innerWidth - px(st.paddingLeft) - px(st.paddingRight),
+    h: window.innerHeight - px(st.paddingTop) - px(st.paddingBottom),
+  };
+}
+
+// 휴대폰 가로 화면: CSS 안내(#rotate)가 보이는 조건과 같다
+const landscapeQuery = window.matchMedia('(orientation: landscape) and (pointer: coarse) and (max-height: 600px)');
+
 function resize() {
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
+  const { w: vw, h: vh } = availableSize();
   scale = Math.min(vw / CONFIG.WIDTH, vh / CONFIG.HEIGHT);
 
   const cssW = Math.floor(CONFIG.WIDTH * scale);
@@ -161,6 +204,7 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 window.visualViewport?.addEventListener('resize', resize);  // 모바일 주소창 변화 대응
+window.addEventListener('orientationchange', () => setTimeout(resize, 200));  // 일부 기기는 회전 직후 크기가 늦게 바뀐다
 resize();
 
 // ============================================================
@@ -244,6 +288,10 @@ const Input = {
     // iOS Safari는 손을 뗄 때(touchend)에만 소리를 허용하는 경우가 있다
     window.addEventListener('touchend', () => Sound.unlock());
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    // iOS Safari는 user-scalable=no를 무시하므로 두 손가락 확대·두 번 탭 확대를 직접 막는다
+    document.addEventListener('gesturestart', (e) => e.preventDefault());
+    document.addEventListener('dblclick', (e) => e.preventDefault());
+    document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
   },
 };
 Input.init();
@@ -736,6 +784,14 @@ function pauseGame() {
   if (Screen.state === 'play') setScreen('paused');
 }
 
+// 자동 일시정지 (PRD 7항 F10): 다른 탭·앱으로 가거나 화면이 꺼지거나 휴대폰을 가로로 돌렸을 때.
+// 카운트다운 중이면 돌아왔을 때 3부터 다시 센다.
+function autoPause() {
+  Input.reset();
+  if (Screen.state === 'play') pauseGame();
+  else if (Screen.state === 'countdown') setScreen('countdown');
+}
+
 function resumeGame() {
   if (Screen.state === 'paused') setScreen('play');
 }
@@ -995,7 +1051,13 @@ const Sound = {
       const data = this.noiseBuffer.getChannelData(0);
       for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
     }
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    // iOS는 전화·알림 등으로 끊기면 'interrupted' 상태가 되므로 실행 중이 아니면 깨운다
+    if (this.ctx.state !== 'running' && this.ctx.state !== 'closed') this.ctx.resume().catch(() => {});
+  },
+
+  // 화면이 숨겨지면 소리 장치를 멈춘다. 다음 터치(unlock)에서 다시 깨어난다.
+  suspend() {
+    if (this.ctx && this.ctx.state === 'running') this.ctx.suspend().catch(() => {});
   },
 
   // 깨우는 중(suspended)에도 예약해 두면 깨어난 뒤 재생된다 (첫 "3" 소리가 빠지지 않게)
@@ -1820,6 +1882,15 @@ function loop(now) {
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    autoPause();
+    Sound.suspend();   // 숨겨진 동안 예약된 소리가 나지 않게
+  }
+});
+window.addEventListener('pagehide', autoPause);
+landscapeQuery.addEventListener?.('change', (e) => { if (e.matches) autoPause(); });
 </script>
 </body>
 </html>
