@@ -55,6 +55,13 @@ const CONFIG = {
   DRAG_THRESHOLD: 12,            // 이만큼(논리 px) 움직이면 탭이 아니라 드래그로 판단
   WALK_FRAME_TIME: 0.12,         // 걷기 그림이 바뀌는 간격(초)
 
+  // 게임 규칙 (PRD 4-1·4-2항)
+  GAME_TIME: 60,                 // 제한 시간(초)
+  START_HEARTS: 3,               // 시작 하트 수
+  INVINCIBLE_TIME: 1.0,          // 정크푸드를 받은 뒤 무적 시간(초)
+  TIME_WARNING: 10,              // 남은 시간이 이 값 이하이면 빨간색으로 표시
+  RESTART_DELAY: 0.8,            // 게임 종료 직후 실수로 다시 시작하지 않게 기다리는 시간(초)
+
   // 충돌 판정 상자 크기: 그림 크기의 80% (억울한 판정을 줄임, PRD 7항 F3)
   HITBOX_RATIO: 0.8,
 
@@ -92,8 +99,10 @@ const CONFIG = {
     post: '#B0BEC5',
     postDark: '#607D8B',
     accent: '#FFC107',
+    warning: '#FF5252',
     text: '#FFFFFF',
     textShadow: '#0B1018',
+    overlay: 'rgba(11, 16, 24, 0.82)',
   },
 };
 
@@ -220,6 +229,8 @@ const PALETTE = {
   P: '#F48FB1',   // 도넛 크림
   D: '#E0B070',   // 도넛 반죽
   d: '#B8864A',   // 도넛 반죽 그림자
+  h: '#4A5568',   // 잃은 하트
+  i: '#363F4F',   // 잃은 하트 그림자
 };
 
 // 복서: 위쪽(머리·팔·몸통)은 모든 그림이 같고 다리만 바뀐다. 28 × 34칸
@@ -419,6 +430,23 @@ const ITEM_ART = {
   ],
 };
 
+// HUD 하트: 11 × 10칸. 잃은 하트는 같은 모양을 회색으로 칠한다.
+const HEART_ART = [
+  '..KKK.KKK..',
+  '.KRRRKRRRK.',
+  'KRWRRRRRRRK',
+  'KRWRRRRRRRK',
+  'KRRRRRRRRrK',
+  '.KRRRRRRrK.',
+  '..KRRRRrK..',
+  '...KRRrK...',
+  '....KrK....',
+  '.....K.....',
+];
+const HEART_EMPTY_ART = HEART_ART.map((row) =>
+  row.replace(/[RW]/g, 'h').replace(/r/g, 'i')
+);
+
 // 글자 배열을 1칸 = 1px 캔버스로 미리 그려 둔다 (매 프레임 다시 그리지 않음)
 function makeSprite(rows, mirror = false) {
   const w = rows[0].length;
@@ -444,6 +472,8 @@ const Assets = {
     playerStand: makeSprite([...PLAYER_BODY, ...LEGS_STAND]),
     playerStepL: makeSprite([...PLAYER_BODY, ...LEGS_STEP]),
     playerStepR: makeSprite([...PLAYER_BODY, ...LEGS_STEP], true),
+    heart: makeSprite(HEART_ART),
+    heartEmpty: makeSprite(HEART_EMPTY_ART),
     // 아이템 그림: ITEM_ART의 이름(id) 그대로 사용
     ...Object.fromEntries(
       Object.entries(ITEM_ART).map(([id, rows]) => [id, makeSprite(rows)])
@@ -562,8 +592,62 @@ let spawnTimer = 0;        // 다음 생성까지 남은 시간(초)
 let lastSpawnX = null;     // 직전에 생성한 아이템의 x (겹침 방지)
 let level = CONFIG.LEVELS[0];
 
-// 2단계 개발 확인용 집계. 3단계에서 점수·하트로 바뀐다.
-const stats = { good: 0, bad: 0, missed: 0 };
+// ------------------------------------------------------------
+// 점수·하트·타이머 (PRD 4-1·4-2·4-6항, 7항 F4)
+// ------------------------------------------------------------
+const game = {
+  score: 0,
+  hearts: CONFIG.START_HEARTS,
+  timeLeft: CONFIG.GAME_TIME,
+  invincible: 0,       // 남은 무적 시간(초)
+  over: false,
+  endReason: '',       // 'time' 또는 'hearts'
+  overTime: 0,         // 게임이 끝난 뒤 지난 시간(초)
+  caught: {},          // 아이템별 받은 개수 { jumpRope: 3, ... }
+};
+
+function resetGame() {
+  game.score = 0;
+  game.hearts = CONFIG.START_HEARTS;
+  game.timeLeft = CONFIG.GAME_TIME;
+  game.invincible = 0;
+  game.over = false;
+  game.endReason = '';
+  game.overTime = 0;
+  game.caught = {};
+  items.length = 0;
+  spawnTimer = 0;
+  lastSpawnX = null;
+  player.x = CONFIG.WIDTH / 2;
+}
+
+function endGame(reason) {
+  game.over = true;
+  game.endReason = reason;
+  game.overTime = 0;
+  player.moving = false;
+}
+
+// 받은 아이템 처리. 정크푸드는 무적 시간에는 영향이 없다.
+// 반환값: 아이템을 화면에서 지울지 여부
+function catchItem(def) {
+  if (def.type === 'bad') {
+    if (game.invincible > 0) return false;   // 무적 중에는 그대로 통과
+    game.hearts--;
+    game.invincible = CONFIG.INVINCIBLE_TIME;
+    if (game.hearts <= 0) endGame('hearts');
+  } else {
+    game.score += def.score;
+  }
+  game.caught[def.id] = (game.caught[def.id] || 0) + 1;
+  return true;
+}
+
+function updateTimer(dt) {
+  game.invincible = Math.max(0, game.invincible - dt);
+  game.timeLeft = Math.max(0, game.timeLeft - dt);
+  if (game.timeLeft <= 0) endGame('time');
+}
 
 // weight 비율에 따라 하나를 무작위로 고른다
 function pickWeighted(list) {
@@ -631,11 +715,10 @@ function updateItems(dt) {
     it.y += it.speed * dt;
 
     if (overlaps(playerBox, hitbox(it.x, it.y, it.w, it.h))) {
-      stats[it.def.type]++;          // 받음
-      items.splice(i, 1);
+      if (catchItem(it.def)) items.splice(i, 1);
+      if (game.over) return;            // 마지막 하트를 잃으면 바로 멈춤
     } else if (it.y > CONFIG.HEIGHT) {
-      if (it.def.type === 'good') stats.missed++;   // 놓친 복싱 아이템
-      items.splice(i, 1);
+      items.splice(i, 1);               // 놓친 아이템은 하트·점수 변화 없음 (PRD 4-3항)
     }
   }
 }
@@ -645,9 +728,9 @@ function updateItems(dt) {
 // ============================================================
 
 // 도트 글꼴 글자 + 아래쪽 그림자 (도트 게임 느낌)
-function drawText(text, x, y, size, color) {
+function drawText(text, x, y, size, color, align = 'center') {
   ctx.font = `${size}px ${CONFIG.FONT}`;
-  ctx.textAlign = 'center';
+  ctx.textAlign = align;
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = CONFIG.COLORS.textShadow;
   ctx.fillText(text, x, y + CONFIG.PIXEL);
@@ -655,13 +738,66 @@ function drawText(text, x, y, size, color) {
   ctx.fillText(text, x, y);
 }
 
-function drawDebugInfo() {
-  // 2단계 확인용 집계. 3단계에서 HUD(점수·하트·시간)로 교체한다.
-  const cx = CONFIG.WIDTH / 2;
-  drawText('2단계: 아이템 낙하·충돌 테스트', cx, 220, 30, CONFIG.COLORS.accent);
-  drawText(`받은 복싱 아이템 ${stats.good}  받은 정크푸드 ${stats.bad}`, cx, 268, 30, CONFIG.COLORS.text);
-  drawText(`놓친 복싱 아이템 ${stats.missed}`, cx, 312, 30, CONFIG.COLORS.text);
+// HUD: 하트 / 남은 시간 / 점수 (PRD 6-2항)
+function drawHud() {
+  const col = CONFIG.COLORS;
+  const p = CONFIG.PIXEL;
+  const top = 184;   // 링 로프·코너 기둥 아래
+  const margin = 40; // 좌우 여백
+
+  // 하트 (왼쪽)
+  for (let i = 0; i < CONFIG.START_HEARTS; i++) {
+    const sprite = i < game.hearts ? Assets.sprites.heart : Assets.sprites.heartEmpty;
+    Assets.draw(sprite, margin + i * (sprite.width + 2) * p, top + 12);
+  }
+
+  // 남은 시간 (가운데). 올림 처리해 0.1초 남았을 때도 1로 보이게 한다.
+  const sec = Math.ceil(game.timeLeft);
+  const timeColor = sec <= CONFIG.TIME_WARNING ? col.warning : col.text;
+  drawText('TIME', CONFIG.WIDTH / 2, top + 20, 24, col.accent);
+  drawText(String(sec), CONFIG.WIDTH / 2, top + 68, 48, timeColor);
+
+  // 점수 (오른쪽)
+  drawText('SCORE', CONFIG.WIDTH - margin, top + 20, 24, col.accent, 'right');
+  drawText(game.score.toLocaleString(), CONFIG.WIDTH - margin, top + 68, 48, col.text, 'right');
 }
+
+// 임시 종료 안내. 4단계에서 정식 결과 화면으로 교체한다.
+function drawGameOver() {
+  const col = CONFIG.COLORS;
+  const cx = CONFIG.WIDTH / 2;
+  ctx.fillStyle = col.overlay;
+  ctx.fillRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+
+  drawText('게임 종료', cx, 380, 72, col.text);
+  drawText(game.endReason === 'time' ? '시간 종료' : '하트를 모두 잃었어요', cx, 440, 32, col.accent);
+  drawText(game.score.toLocaleString() + '점', cx, 560, 88, col.text);
+
+  // 아이템별 받은 개수
+  const goods = CONFIG.ITEMS.filter((it) => it.type === 'good');
+  const bads = CONFIG.ITEMS.filter((it) => it.type === 'bad');
+  goods.forEach((def, i) => {
+    const y = 650 + i * 52;
+    drawText(`${def.name} (${def.score}점)`, cx - 20, y, 30, col.text, 'right');
+    drawText(`× ${game.caught[def.id] || 0}`, cx + 20, y, 30, col.text, 'left');
+  });
+  const badCount = bads.reduce((sum, def) => sum + (game.caught[def.id] || 0), 0);
+  drawText('정크푸드', cx - 20, 650 + goods.length * 52, 30, col.warning, 'right');
+  drawText(`× ${badCount}`, cx + 20, 650 + goods.length * 52, 30, col.warning, 'left');
+
+  if (game.overTime >= CONFIG.RESTART_DELAY) {
+    drawText('화면을 누르면 다시 시작', cx, 1000, 32, col.accent);
+  }
+}
+
+// 게임 종료 후 다시 시작 (터치·클릭·스페이스·엔터)
+function tryRestart() {
+  if (game.over && game.overTime >= CONFIG.RESTART_DELAY) resetGame();
+}
+canvas.addEventListener('pointerdown', tryRestart);
+window.addEventListener('keydown', (e) => {
+  if (e.key === ' ' || e.key === 'Enter') tryRestart();
+});
 
 function drawItems() {
   for (const it of items) {
@@ -681,11 +817,17 @@ function render() {
   ctx.imageSmoothingEnabled = false;
 
   ctx.drawImage(background, 0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
-  drawDebugInfo();
 
   Assets.drawShadow(player.x, player.y, 24);
-  Assets.draw(currentPlayerSprite(), player.x - player.w / 2, player.y - player.h);
+  // 무적 시간에는 0.1초 간격으로 깜빡임 (PRD 4-1항)
+  const blinkOff = game.invincible > 0 && Math.floor(game.invincible * 10) % 2 === 0;
+  if (!blinkOff) {
+    Assets.draw(currentPlayerSprite(), player.x - player.w / 2, player.y - player.h);
+  }
   drawItems();   // 받는 순간 캐릭터 앞에 보이도록 아이템을 나중에 그림
+  drawHud();
+
+  if (game.over) drawGameOver();
 }
 
 // ============================================================
@@ -698,8 +840,15 @@ function loop(now) {
   const dt = Math.min(0.05, (now - lastTime) / 1000);
   lastTime = now;
 
-  updatePlayer(dt);
-  updateItems(dt);
+  if (game.over) {
+    game.overTime += dt;
+  } else {
+    updateTimer(dt);
+    if (!game.over) {
+      updatePlayer(dt);
+      updateItems(dt);
+    }
+  }
   render();
   requestAnimationFrame(loop);
 }
