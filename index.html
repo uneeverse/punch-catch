@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>펀치 캐치</title>
+<!-- 도트 글꼴: 갈무리 (SIL Open Font License 1.1) -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/galmuri@2.40.3/dist/galmuri.css">
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #10161F;          /* 게임 화면 바깥 여백 색 */
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;  /* iOS 길게 누르기 메뉴 방지 */
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas {
+    display: block;
+    touch-action: none;           /* 터치 스크롤·확대 방지 */
+    image-rendering: pixelated;   /* 도트가 흐려지지 않게 */
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<script>
+'use strict';
+
+// ============================================================
+// CONFIG: 조정 가능한 값 (PRD 4·5·9항)
+// ============================================================
+const CONFIG = {
+  // 논리 해상도 (9:16). 모든 좌표는 이 크기 기준으로 계산한다.
+  WIDTH: 720,
+  HEIGHT: 1280,
+
+  // 도트 한 칸의 크기(논리 px). 클수록 도트가 굵어진다.
+  // 4이면 화면이 가로 180칸으로 나뉜다.
+  PIXEL: 4,
+
+  // 캐릭터 (크기는 도트 그림 크기 × PIXEL로 자동 결정)
+  PLAYER_BOTTOM_MARGIN: 90,      // 화면 아래에서 캐릭터 발까지 거리
+  PLAYER_SPEED_RATIO: 0.9,       // 키보드·탭 이동 속도: 초당 화면 폭의 90%
+  DRAG_FOLLOW: 18,               // 드래그 따라가기 반응 속도 (클수록 빠름)
+  DRAG_THRESHOLD: 12,            // 이만큼(논리 px) 움직이면 탭이 아니라 드래그로 판단
+  WALK_FRAME_TIME: 0.12,         // 걷기 그림이 바뀌는 간격(초)
+
+  // 충돌 판정 상자 크기: 그림 크기의 80% (억울한 판정을 줄임, PRD 7항 F3)
+  HITBOX_RATIO: 0.8,
+
+  // 떨어지는 아이템 (PRD 4-3·4-4항)
+  // weight: 같은 종류(good/bad) 안에서의 등장 비율, speed: 낙하 속도 배수
+  ITEMS: [
+    { id: 'jumpRope', name: '줄넘기',   type: 'good', score: 10, weight: 40, speed: 1.0 },
+    { id: 'boxingShoe', name: '복싱화', type: 'good', score: 20, weight: 30, speed: 1.1 },
+    { id: 'glove',    name: '글러브',   type: 'good', score: 30, weight: 20, speed: 1.2 },
+    { id: 'headgear', name: '헤드기어', type: 'good', score: 50, weight: 10, speed: 1.35 },
+    { id: 'burger',   name: '햄버거',   type: 'bad',  score: 0,  weight: 1,  speed: 1.0 },
+    { id: 'cola',     name: '콜라',     type: 'bad',  score: 0,  weight: 1,  speed: 1.0 },
+    { id: 'donut',    name: '도넛',     type: 'bad',  score: 0,  weight: 1,  speed: 1.0 },
+  ],
+  SPAWN_MIN_GAP: 140,            // 연속으로 나오는 아이템 사이의 최소 가로 간격(논리 px)
+
+  // 난이도 단계 (PRD 4-5항). fallSpeed는 초당 화면 높이 비율.
+  // 2단계 개발에서는 1단계 값만 사용하고, 단계 상승은 5단계 개발에서 연결한다.
+  LEVELS: [
+    { fallSpeed: 0.35, spawnInterval: 0.9,  badRatio: 0.15 },
+    { fallSpeed: 0.45, spawnInterval: 0.75, badRatio: 0.20 },
+    { fallSpeed: 0.55, spawnInterval: 0.6,  badRatio: 0.25 },
+    { fallSpeed: 0.65, spawnInterval: 0.5,  badRatio: 0.30 },
+  ],
+
+  FONT: 'Galmuri11, sans-serif',
+
+  COLORS: {
+    mat: '#1E2A3A',
+    matDot: '#22314A',
+    matLine: '#2A3B54',
+    rope: '#E53935',
+    ropeLight: '#FF7A73',
+    ropeDark: '#8E1B1B',
+    post: '#B0BEC5',
+    postDark: '#607D8B',
+    accent: '#FFC107',
+    text: '#FFFFFF',
+    textShadow: '#0B1018',
+  },
+};
+
+// ============================================================
+// 화면 설정: 논리 해상도를 화면에 비율 맞춰 표시 (PRD 9항)
+// ============================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let scale = 1;   // 논리 px → CSS px 배율
+
+function resize() {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  scale = Math.min(vw / CONFIG.WIDTH, vh / CONFIG.HEIGHT);
+
+  const cssW = Math.floor(CONFIG.WIDTH * scale);
+  const cssH = Math.floor(CONFIG.HEIGHT * scale);
+  const dpr = window.devicePixelRatio || 1;
+
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  canvas.width = Math.floor(cssW * dpr);    // 고해상도 화면에서도 선명하게
+  canvas.height = Math.floor(cssH * dpr);
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+window.visualViewport?.addEventListener('resize', resize);  // 모바일 주소창 변화 대응
+resize();
+
+// ============================================================
+// Input: 터치·마우스·키보드 입력 (PRD 5항)
+// ============================================================
+const Input = {
+  keys: { left: false, right: false },
+  pointerId: null,     // 현재 추적 중인 손가락(또는 마우스)
+  startX: 0,
+  pointerX: 0,
+  dragging: false,     // true면 드래그, false면 누르고 있기(탭 이동)
+
+  // 화면 좌표를 논리 좌표(x)로 변환
+  toLogicalX(clientX) {
+    const rect = canvas.getBoundingClientRect();
+    return (clientX - rect.left) / scale;
+  },
+
+  // -1(왼쪽), 0(정지), 1(오른쪽): 키보드 또는 탭 이동 방향
+  holdDirection() {
+    if (this.pointerId !== null && !this.dragging) {
+      return this.pointerX < CONFIG.WIDTH / 2 ? -1 : 1;
+    }
+    return (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);
+  },
+
+  init() {
+    canvas.addEventListener('pointerdown', (e) => {
+      if (this.pointerId !== null) return;   // 첫 번째 손가락만 사용
+      this.pointerId = e.pointerId;
+      this.startX = this.pointerX = this.toLogicalX(e.clientX);
+      this.dragging = false;
+      canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== this.pointerId) return;
+      this.pointerX = this.toLogicalX(e.clientX);
+      if (Math.abs(this.pointerX - this.startX) > CONFIG.DRAG_THRESHOLD) {
+        this.dragging = true;   // 드래그가 탭보다 우선 (PRD 5항)
+      }
+    });
+    const release = (e) => {
+      if (e.pointerId !== this.pointerId) return;
+      this.pointerId = null;
+      this.dragging = false;
+    };
+    canvas.addEventListener('pointerup', release);
+    canvas.addEventListener('pointercancel', release);
+
+    const setKey = (e, pressed) => {
+      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') this.keys.left = pressed;
+      else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') this.keys.right = pressed;
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', (e) => setKey(e, true));
+    window.addEventListener('keyup', (e) => setKey(e, false));
+
+    // 다른 창으로 이동하면 눌린 키를 모두 해제 (키가 눌린 채로 남는 문제 방지)
+    window.addEventListener('blur', () => {
+      this.keys.left = this.keys.right = false;
+      this.pointerId = null;
+      this.dragging = false;
+    });
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  },
+};
+Input.init();
+
+// ============================================================
+// Assets: 도트 그림 (PRD 8-2항)
+// 글자 한 개 = 도트 한 칸. '.'은 투명이다.
+// 나중에 PNG 이미지로 바꿀 때는 Assets.sprites만 교체한다.
+// ============================================================
+const PALETTE = {
+  K: '#1A1220',   // 외곽선·눈
+  S: '#F2C29B',   // 피부
+  s: '#C98F6B',   // 피부 그림자
+  H: '#3B2A20',   // 머리카락
+  R: '#E53935',   // 글러브·신발
+  r: '#A72323',   // 글러브 그림자
+  W: '#FFFFFF',   // 흰색 (손목 띠, 허리띠, 하이라이트)
+  B: '#1E88E5',   // 파랑 (트렁크, 헤드기어)
+  b: '#1259A8',   // 파랑 그림자
+  Y: '#FFC107',   // 노랑 (치즈, 스프링클)
+  J: '#FFE066',   // 줄넘기 (밝은 노랑, 어두운 배경에서 잘 보이게)
+  g: '#1A1220',   // 줄넘기 테두리 (다른 아이템과 같은 짙은 외곽선)
+  e: '#C8CED6',   // 복싱화·글러브 손목 그림자 (밝은 회색)
+  G: '#7CB342',   // 나쁜 아이템 외곽선 (PRD 8-1항)
+  O: '#F0A04B',   // 햄버거 빵
+  o: '#C77A2A',   // 햄버거 빵 그림자
+  L: '#66BB6A',   // 양상추
+  M: '#6D4C41',   // 패티
+  C: '#D32F2F',   // 콜라 컵
+  c: '#9A1F1F',   // 콜라 컵 그림자
+  P: '#F48FB1',   // 도넛 크림
+  D: '#E0B070',   // 도넛 반죽
+  d: '#B8864A',   // 도넛 반죽 그림자
+};
+
+// 복서: 위쪽(머리·팔·몸통)은 모든 그림이 같고 다리만 바뀐다. 28 × 34칸
+const PLAYER_BODY = [
+  '..KKKKK...KKKKKKKK...KKKKK..',
+  '.KRWRRRK.KHHHHHHHHK.KRRRWRK.',
+  '.KRRRRRK.KHHHHHHHHK.KRRRRRK.',
+  '.KRRRRRK.KSHHHHHHSK.KRRRRRK.',
+  '.KRRRRrK.KSSSSSSSSK.KrRRRRK.',
+  '.KrRRrrK.KSKSSSSKSK.KrrRRrK.',
+  '..KrrrK..KSKSSSSKSK..KrrrK..',
+  '..KWWWK..KsSSSSSSsK..KWWWK..',
+  '..KWWWK..KSSSKKSSSK..KWWWK..',
+  '...KSK....KsSSSSsK....KSK...',
+  '...KSK.....KKKKKK.....KSK...',
+  '...KSK....KKSSSSKK....KSK...',
+  '...KSSKKKKKSSSSSSKKKKKSSK...',
+  '...KSSSSSSSSSSSSSSSSSSSSK...',
+  '...KsSSSSSSSSSSSSSSSSSSsK...',
+  '....KKsSSSSSSSSSSSSSSsKK....',
+  '......KSSSsSSSSSSsSSSK......',
+  '......KSSSSsSSSSsSSSSK......',
+  '......KSSSSSSSSSSSSSSK......',
+  '......KsSSSSSSSSSSSSsK......',
+  '......KWWWWWWWWWWWWWWK......',
+  '......KBBBBBBBBBBBBBBK......',
+  '......KBBBBBBWWBBBBBBK......',
+  '......KBBBBBBBBBBBBBBK......',
+  '......KbBBBBBKKBBBBBbK......',
+  '......KbbBBBK..KBBBbbK......',
+  '.......KKKKKK..KKKKKK.......',
+];
+
+// 두 발로 서 있는 다리
+const LEGS_STAND = [
+  '.......KSSSK....KSSSK.......',
+  '.......KSSSK....KSSSK.......',
+  '.......KsSsK....KsSsK.......',
+  '......KKKKKK....KKKKKK......',
+  '.....KRRRRWK....KWRRRRK.....',
+  '.....KrrrrrK....KrrrrrK.....',
+  '......KKKKK......KKKKK......',
+];
+
+// 왼발을 든 다리 (좌우 반전하면 오른발을 든 그림)
+const LEGS_STEP = [
+  '.......KSSSK....KSSSK.......',
+  '.......KsSsK....KSSSK.......',
+  '......KKKKKK....KsSsK.......',
+  '.....KRRRRWK....KKKKKK......',
+  '.....KrrrrrK....KWRRRRK.....',
+  '......KKKKK.....KrrrrrK.....',
+  '.................KKKKK......',
+];
+
+// 떨어지는 아이템: 18 × 18칸. 나쁜 아이템은 초록 외곽선(G)으로 구분한다.
+const ITEM_ART = {
+  jumpRope: [
+    '..................',
+    '.gggg........gggg.',
+    '.gJWg........gJWg.',
+    '.gJJg........gJJg.',
+    '.gJJg........gJJg.',
+    '.gJJg........gJJg.',
+    '.gJJg........gJJg.',
+    '.gggg........gggg.',
+    '..gJg........gJg..',
+    '..gJg........gJg..',
+    '..gJJg......gJJg..',
+    '...gJg......gJg...',
+    '...gJJg....gJJg...',
+    '....gJJg..gJJg....',
+    '.....gJJggJJg.....',
+    '......gJJJJg......',
+    '.......gggg.......',
+    '..................',
+  ],
+  boxingShoe: [
+    '..................',
+    '...KKKKKKK........',
+    '...KRRRRRK........',
+    '...KWRWRWK........',
+    '...KWWRWWK........',
+    '...KWRWRWK........',
+    '...KWWRWWK........',
+    '...KWRWRWK........',
+    '...KWWRWWK........',
+    '...KeWRWRWKKK.....',
+    '...KeWWRWWWWWKK...',
+    '...KeWRWRWWWWWWK..',
+    '..KeeWWWWWWWWWWWK.',
+    '..KeeeWWWWWWWWWWK.',
+    '..KRRRRRRRRRRRRRK.',
+    '..KKKKKKKKKKKKKKK.',
+    '...KKKKKKKKKKKKK..',
+    '..................',
+  ],
+  glove: [
+    '.....KKKKKKK......',
+    '...KKRRRRRRRKK....',
+    '..KRRWWRRRRRRRK...',
+    '.KRRWWRRRRRRRRRK..',
+    '.KRWRRRRRRRRRRRK..',
+    '.KRRRRRRRRRRRRrK..',
+    'KKKRRRRRRRRRRRrK..',
+    'KRRKRRRRRRRRRrrK..',
+    'KRRRKRRRRRRRRrrK..',
+    'KRRRKRRRRRRRrrrK..',
+    '.KrrKRRRRRRRrrK...',
+    '..KKKRRRRRRrrK....',
+    '....KKKKKKKKK.....',
+    '....KWWWWWWWK.....',
+    '....KWWWWWWWK.....',
+    '....KeeeeeeeK.....',
+    '....KrrrrrrrK.....',
+    '.....KKKKKKK......',
+  ],
+  headgear: [
+    '.....KKKKKKKK.....',
+    '...KKBBBBBBBBKK...',
+    '..KBBWWBBBBBBBBK..',
+    '.KBBWBBBBBBBBBBBK.',
+    '.KBBBBBBBBBBBBBBK.',
+    '.KBBKKKKKKKKKKBBK.',
+    'KBBKSSSSSSSSSSKBBK',
+    'KBBKSKKSSSSKKSKBBK',
+    'KBBKSSSSSSSSSSKBBK',
+    'KbBBKKKSSSSKKKBBbK',
+    'KbBBBBKSSSSKBBBBbK',
+    'KbBBBBKSKKSKBBBBbK',
+    '.KbBBBKSSSSKBBBbK.',
+    '.KbBBBBKKKKBBBBbK.',
+    '..KbbBBBBBBBBbbK..',
+    '...KbbbBBBBbbbK...',
+    '....KKKKKKKKKK....',
+    '..................',
+  ],
+  burger: [
+    '..................',
+    '......GGGGGG......',
+    '....GGOOOOOOGG....',
+    '...GOOWOOOOWOOG...',
+    '..GOOOOOOWOOOOOG..',
+    '.GOOWOOOOOOOOWOOG.',
+    '.GooooooooooooooG.',
+    'GLLLLLLLLLLLLLLLLG',
+    '.GYYYYYYYYYYYYYYG.',
+    '.GMMMMMMMMMMMMMMG.',
+    '.GMMMMMMMMMMMMMMG.',
+    '.GMMMMMMMMMMMMMMG.',
+    '.GOOOOOOOOOOOOOOG.',
+    '.GooooooooooooooG.',
+    '..GooooooooooooG..',
+    '...GGGGGGGGGGGG...',
+    '..................',
+    '..................',
+  ],
+  cola: [
+    '...........GG.....',
+    '...........GWG....',
+    '..........GWG.....',
+    '..GGGGGGGGWGGGGG..',
+    '..GWWWWWWWWWWWWG..',
+    '...GGGGGGGGGGGG...',
+    '...GCCCCCCCCCCG...',
+    '...GCWCCCCCCCcG...',
+    '....GCWWWWWWCG....',
+    '....GCWWWWWWCG....',
+    '....GCCCCCCCcG....',
+    '....GCWCCCCCcG....',
+    '.....GCCCCCcG.....',
+    '.....GCCCCccG.....',
+    '.....GCCCCccG.....',
+    '.....GGGGGGGG.....',
+    '..................',
+    '..................',
+  ],
+  donut: [
+    '..................',
+    '......GGGGGG......',
+    '....GGPPPPPPGG....',
+    '...GPPWPPPPYPPG...',
+    '..GPPWPPCPPPPPPG..',
+    '.GPPPPYPPPPPCPPPG.',
+    '.GPYPPPGGGGPPPYPG.',
+    'GPPPPPG....GPPPPPG',
+    'GPPCPPG....GPPWPPG',
+    'GDPPPPG....GPPPPDG',
+    'GDDPPPPGGGGPPPPDDG',
+    '.GDDPPPPPPPPPPDDG.',
+    '.GdDDPPPPPPPPDDdG.',
+    '..GdDDDDDDDDDDdG..',
+    '...GddDDDDDDddG...',
+    '....GGddddddGG....',
+    '......GGGGGG......',
+    '..................',
+  ],
+};
+
+// 글자 배열을 1칸 = 1px 캔버스로 미리 그려 둔다 (매 프레임 다시 그리지 않음)
+function makeSprite(rows, mirror = false) {
+  const w = rows[0].length;
+  const h = rows.length;
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const g = c.getContext('2d');
+  rows.forEach((row, y) => {
+    if (row.length !== w) console.warn(`도트 그림 ${y}번째 줄 길이가 다릅니다: ${row.length}`);
+    for (let x = 0; x < w; x++) {
+      const color = PALETTE[row[x]];
+      if (!color) continue;
+      g.fillStyle = color;
+      g.fillRect(mirror ? w - 1 - x : x, y, 1, 1);
+    }
+  });
+  return c;
+}
+
+const Assets = {
+  sprites: {
+    playerStand: makeSprite([...PLAYER_BODY, ...LEGS_STAND]),
+    playerStepL: makeSprite([...PLAYER_BODY, ...LEGS_STEP]),
+    playerStepR: makeSprite([...PLAYER_BODY, ...LEGS_STEP], true),
+    // 아이템 그림: ITEM_ART의 이름(id) 그대로 사용
+    ...Object.fromEntries(
+      Object.entries(ITEM_ART).map(([id, rows]) => [id, makeSprite(rows)])
+    ),
+  },
+
+  // 도트 그림을 PIXEL배로 키워 그린다. 위치를 도트 격자에 맞춰 반쯤 걸친 도트가 없게 한다.
+  draw(sprite, x, y) {
+    const p = CONFIG.PIXEL;
+    ctx.drawImage(sprite,
+      Math.round(x / p) * p, Math.round(y / p) * p,
+      sprite.width * p, sprite.height * p);
+  },
+
+  // 캐릭터 발밑 그림자 (도트 계단 모양 타원)
+  drawShadow(cx, footY, widthDots) {
+    const p = CONFIG.PIXEL;
+    const x = Math.round(cx / p) * p;
+    const y = Math.round(footY / p) * p;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.fillRect(x - (widthDots / 2 - 2) * p, y - p, (widthDots - 4) * p, p);
+    ctx.fillRect(x - (widthDots / 2) * p, y, widthDots * p, p);
+    ctx.fillRect(x - (widthDots / 2 - 2) * p, y + p, (widthDots - 4) * p, p);
+  },
+};
+
+// ============================================================
+// 배경: 도트 링 매트를 한 번만 그려 두고 매 프레임 붙여 넣는다
+// ============================================================
+const background = (() => {
+  const p = CONFIG.PIXEL;
+  const w = CONFIG.WIDTH / p;     // 180칸
+  const h = CONFIG.HEIGHT / p;    // 320칸
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const g = c.getContext('2d');
+  const col = CONFIG.COLORS;
+
+  // 매트 바탕과 잔잔한 점무늬
+  g.fillStyle = col.mat;
+  g.fillRect(0, 0, w, h);
+  g.fillStyle = col.matDot;
+  for (let y = 0; y < h; y += 4) {
+    for (let x = (y / 4) % 2 === 0 ? 0 : 2; x < w; x += 4) g.fillRect(x, y, 1, 1);
+  }
+
+  // 매트 이음선
+  g.fillStyle = col.matLine;
+  for (let y = 60; y < h; y += 50) g.fillRect(0, y, w, 1);
+
+  // 링 로프 3줄 (밝은 줄 · 기본 · 어두운 줄로 입체감)
+  for (let i = 0; i < 3; i++) {
+    const y = 12 + i * 8;
+    g.fillStyle = col.ropeLight; g.fillRect(0, y, w, 1);
+    g.fillStyle = col.rope;      g.fillRect(0, y + 1, w, 1);
+    g.fillStyle = col.ropeDark;  g.fillRect(0, y + 2, w, 1);
+  }
+
+  // 양쪽 코너 기둥
+  for (const x of [2, w - 6]) {
+    g.fillStyle = col.postDark; g.fillRect(x, 6, 4, 34);
+    g.fillStyle = col.post;     g.fillRect(x, 6, 3, 34);
+    g.fillStyle = col.textShadow;
+    g.fillRect(x - 1, 5, 6, 1);
+    g.fillRect(x - 1, 40, 6, 1);
+  }
+
+  // 캐릭터가 서는 링 바닥 가장자리
+  const floorY = Math.round((CONFIG.HEIGHT - CONFIG.PLAYER_BOTTOM_MARGIN) / p) + 6;
+  g.fillStyle = col.text;
+  g.fillRect(0, floorY, w, 1);
+  g.fillStyle = col.matLine;
+  g.fillRect(0, floorY + 1, w, h - floorY - 1);
+  return c;
+})();
+
+// ============================================================
+// Game: 상태와 갱신
+// ============================================================
+const player = {
+  x: CONFIG.WIDTH / 2,                                  // 발 가운데 x
+  y: CONFIG.HEIGHT - CONFIG.PLAYER_BOTTOM_MARGIN,       // 발 위치 y
+  w: Assets.sprites.playerStand.width * CONFIG.PIXEL,
+  h: Assets.sprites.playerStand.height * CONFIG.PIXEL,
+  moving: false,
+  walkTime: 0,                                          // 걷기 그림 전환용 누적 시간
+};
+
+function updatePlayer(dt) {
+  const prevX = player.x;
+
+  if (Input.pointerId !== null && Input.dragging) {
+    // 드래그: 손가락 x를 부드럽게 따라감
+    const t = Math.min(1, dt * CONFIG.DRAG_FOLLOW);
+    player.x += (Input.pointerX - player.x) * t;
+  } else {
+    // 키보드·탭: 일정 속도로 이동
+    player.x += Input.holdDirection() * CONFIG.WIDTH * CONFIG.PLAYER_SPEED_RATIO * dt;
+  }
+
+  // 화면 밖으로 나가지 않게 제한
+  const half = player.w / 2;
+  player.x = Math.max(half, Math.min(CONFIG.WIDTH - half, player.x));
+
+  // 도트 반 칸 이상 움직였으면 걷는 중으로 판단
+  player.moving = Math.abs(player.x - prevX) > CONFIG.PIXEL / 2;
+  player.walkTime = player.moving ? player.walkTime + dt : 0;
+}
+
+// ------------------------------------------------------------
+// 아이템 생성·낙하·충돌 (PRD 4-3~4-5항, 7항 F2·F3)
+// ------------------------------------------------------------
+const items = [];          // 화면에 떨어지고 있는 아이템
+let spawnTimer = 0;        // 다음 생성까지 남은 시간(초)
+let lastSpawnX = null;     // 직전에 생성한 아이템의 x (겹침 방지)
+let level = CONFIG.LEVELS[0];
+
+// 2단계 개발 확인용 집계. 3단계에서 점수·하트로 바뀐다.
+const stats = { good: 0, bad: 0, missed: 0 };
+
+// weight 비율에 따라 하나를 무작위로 고른다
+function pickWeighted(list) {
+  const total = list.reduce((sum, it) => sum + it.weight, 0);
+  let r = Math.random() * total;
+  for (const it of list) {
+    r -= it.weight;
+    if (r < 0) return it;
+  }
+  return list[list.length - 1];
+}
+
+function spawnItem() {
+  const type = Math.random() < level.badRatio ? 'bad' : 'good';
+  const def = pickWeighted(CONFIG.ITEMS.filter((it) => it.type === type));
+  const sprite = Assets.sprites[def.id];
+  const w = sprite.width * CONFIG.PIXEL;
+  const h = sprite.height * CONFIG.PIXEL;
+
+  // 직전 아이템과 너무 가깝지 않은 x를 고른다 (몇 번 시도 후 포기)
+  let x;
+  for (let i = 0; i < 5; i++) {
+    x = w / 2 + Math.random() * (CONFIG.WIDTH - w);
+    if (lastSpawnX === null || Math.abs(x - lastSpawnX) >= CONFIG.SPAWN_MIN_GAP) break;
+  }
+  lastSpawnX = x;
+
+  items.push({
+    def,
+    x,                 // 가운데 x
+    y: -h,             // 위쪽 y (화면 위에서 시작)
+    w,
+    h,
+    speed: level.fallSpeed * CONFIG.HEIGHT * def.speed,   // 초당 논리 px
+  });
+}
+
+// 가운데 기준으로 줄인 충돌 상자
+function hitbox(cx, top, w, h) {
+  const r = CONFIG.HITBOX_RATIO;
+  return {
+    left: cx - (w * r) / 2,
+    right: cx + (w * r) / 2,
+    top: top + (h * (1 - r)) / 2,
+    bottom: top + h - (h * (1 - r)) / 2,
+  };
+}
+
+function overlaps(a, b) {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+function updateItems(dt) {
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnItem();
+    spawnTimer += level.spawnInterval;
+  }
+
+  const playerBox = hitbox(player.x, player.y - player.h, player.w, player.h);
+
+  // 배열에서 지우면서 돌기 때문에 뒤에서부터 순회
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    it.y += it.speed * dt;
+
+    if (overlaps(playerBox, hitbox(it.x, it.y, it.w, it.h))) {
+      stats[it.def.type]++;          // 받음
+      items.splice(i, 1);
+    } else if (it.y > CONFIG.HEIGHT) {
+      if (it.def.type === 'good') stats.missed++;   // 놓친 복싱 아이템
+      items.splice(i, 1);
+    }
+  }
+}
+
+// ============================================================
+// 그리기
+// ============================================================
+
+// 도트 글꼴 글자 + 아래쪽 그림자 (도트 게임 느낌)
+function drawText(text, x, y, size, color) {
+  ctx.font = `${size}px ${CONFIG.FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = CONFIG.COLORS.textShadow;
+  ctx.fillText(text, x, y + CONFIG.PIXEL);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+}
+
+function drawDebugInfo() {
+  // 2단계 확인용 집계. 3단계에서 HUD(점수·하트·시간)로 교체한다.
+  const cx = CONFIG.WIDTH / 2;
+  drawText('2단계: 아이템 낙하·충돌 테스트', cx, 220, 30, CONFIG.COLORS.accent);
+  drawText(`받은 복싱 아이템 ${stats.good}  받은 정크푸드 ${stats.bad}`, cx, 268, 30, CONFIG.COLORS.text);
+  drawText(`놓친 복싱 아이템 ${stats.missed}`, cx, 312, 30, CONFIG.COLORS.text);
+}
+
+function drawItems() {
+  for (const it of items) {
+    Assets.draw(Assets.sprites[it.def.id], it.x - it.w / 2, it.y);
+  }
+}
+
+function currentPlayerSprite() {
+  const s = Assets.sprites;
+  if (!player.moving) return s.playerStand;
+  const frame = Math.floor(player.walkTime / CONFIG.WALK_FRAME_TIME) % 2;
+  return frame === 0 ? s.playerStepL : s.playerStepR;
+}
+
+function render() {
+  // 캔버스 크기가 바뀌면 설정이 초기화되므로 매 프레임 지정
+  ctx.imageSmoothingEnabled = false;
+
+  ctx.drawImage(background, 0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+  drawDebugInfo();
+
+  Assets.drawShadow(player.x, player.y, 24);
+  Assets.draw(currentPlayerSprite(), player.x - player.w / 2, player.y - player.h);
+  drawItems();   // 받는 순간 캐릭터 앞에 보이도록 아이템을 나중에 그림
+}
+
+// ============================================================
+// 게임 루프: 경과 시간(dt) 기반 (PRD 9항)
+// ============================================================
+let lastTime = performance.now();
+
+function loop(now) {
+  // 탭 전환 등으로 오래 멈췄다 돌아와도 캐릭터가 순간이동하지 않게 dt 상한
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+
+  updatePlayer(dt);
+  updateItems(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
