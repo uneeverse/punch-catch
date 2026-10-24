@@ -118,6 +118,14 @@ const CONFIG = {
 
   // 소리 (PRD 7-2항)
   SFX_VOLUME: 0.7,               // 효과음 크기 (0~1)
+
+  // 진동 패턴(밀리초): [진동, 쉼, 진동, ...]. 진동을 지원하는 기기(주로 Android)에서만 동작한다.
+  VIBRATION: {
+    catch: [12],                 // 복싱 용품 획득: 짧게 톡
+    hit: [70, 40, 70],           // 정크푸드 피격: 두 번 강하게
+    levelUp: [30, 60, 30],       // 레벨 업
+    end: [200],                  // 게임 종료
+  },
   BGM_VOLUME: 0.22,              // 배경음악 크기 (0~1)
   BGM_BPM: 132,                  // 배경음악 빠르기
   STORAGE_MUTED: 'punchCatch.muted',   // 소리 끄기 설정을 저장하는 localStorage 키
@@ -795,6 +803,7 @@ function pauseGame() {
 // 카운트다운 중이면 돌아왔을 때 3부터 다시 센다.
 function autoPause() {
   Input.reset();
+  Haptics.stop();
   if (Screen.state === 'play') pauseGame();
   else if (Screen.state === 'countdown') setScreen('countdown');
 }
@@ -811,6 +820,7 @@ function endGame(reason) {
   Share.prepare();   // 공유 버튼을 누르는 순간 바로 공유 창을 열 수 있게 이미지를 미리 만든다
   setScreen('result');
   Sound.play('end', reason);
+  Haptics.play('end');
 }
 
 // 받은 아이템 처리. 정크푸드는 무적 시간에는 영향이 없다.
@@ -844,6 +854,7 @@ function updateLevel(dt) {
     level = CONFIG.LEVELS[index];
     game.levelUpTimer = CONFIG.LEVEL_UP_TIME;
     Sound.play('levelUp');
+    Haptics.play('levelUp');
   }
 }
 
@@ -917,6 +928,7 @@ function updateItems(dt) {
         Effects.onCatch(it);
         if (it.def.type === 'good') Sound.play('catch', it.def.score);
         else Sound.play('hit');
+        Haptics.play(it.def.type === 'good' ? 'catch' : 'hit');
         items.splice(i, 1);
       }
       if (game.over) return;            // 마지막 하트를 잃으면 바로 멈춤
@@ -1149,6 +1161,24 @@ const Sound = {
   },
 };
 Sound.loadSetting();
+
+// ============================================================
+// Haptics: 진동 피드백 (Vibration API)
+// 지원하지 않는 기기(iPhone Safari, PC)에서는 아무 일도 하지 않는다.
+// ============================================================
+const Haptics = {
+  supported: typeof navigator.vibrate === 'function',
+
+  play(name) {
+    if (!this.supported) return;
+    try { navigator.vibrate(CONFIG.VIBRATION[name]); } catch (e) { /* 무시 */ }
+  },
+
+  stop() {
+    if (!this.supported) return;
+    try { navigator.vibrate(0); } catch (e) { /* 무시 */ }
+  },
+};
 
 // 효과음 모음: (시작 시각, 추가 정보) → 소리 예약
 const SFX = {
