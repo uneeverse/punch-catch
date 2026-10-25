@@ -176,6 +176,7 @@ const CONFIG = {
     ropeDark: '#8E1B1B',
     post: '#B0BEC5',
     postDark: '#607D8B',
+    postText: '#263445',   // 코너 기둥 BEAST · BOX 글씨
     accent: '#FFC107',
     accentDark: '#C79100',
     button: '#33465F',
@@ -764,7 +765,7 @@ const background = (() => {
     O: ['010', '101', '101', '101', '010'],
     X: ['101', '101', '010', '101', '101'],
   };
-  g.fillStyle = col.postDark;
+  g.fillStyle = col.postText;
   [['BEAST', 3], ['BOX', w - 7]].forEach(([word, x]) => {
     const top = 6 + Math.floor((34 - (word.length * 6 - 1)) / 2);   // 기둥 가운데
     [...word].forEach((ch, i) => {
