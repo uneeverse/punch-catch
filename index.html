@@ -129,11 +129,13 @@ const CONFIG = {
   BGM_VOLUME: 0.22,              // 배경음악 크기 (0~1)
   BGM_BPM: 132,                  // 배경음악 빠르기
   STORAGE_MUTED: 'punchCatch.muted',   // 소리 끄기 설정을 저장하는 localStorage 키
+  STORAGE_LOOK: 'punchCatch.look',     // 고른 캐릭터·색을 저장하는 localStorage 키
 
   // 최고 점수·공유 (PRD 7-1항, 7항 F7·F8)
   STORAGE_BEST: 'punchCatch.best',     // 최고 점수를 저장하는 localStorage 키
   SHARE_CARD_SIZE: 720,          // 공유용 결과 카드 이미지 크기(정사각형, px)
   MESSAGE_TIME: 1.8,             // "복사했어요" 같은 안내 문구 표시 시간(초)
+  UNLOCK_MESSAGE_TIME: 3.5,      // "새로 열림" 안내 문구 표시 시간(초)
 
   // 카카오톡 공유 (카카오 JavaScript SDK). 키가 비어 있으면 카카오톡 버튼을 숨긴다.
   // 키는 카카오 개발자 콘솔 [앱] > [플랫폼 키] > [JavaScript 키]에서 복사한다.
@@ -400,20 +402,85 @@ const LEGS_STEP = [
 
 // 받는 순간 자세: 두 글러브를 3칸 위로 뻗는다 (팔을 늘리고 머리 위는 비움). 28 × 37칸
 const CATCH_LIFT = 3;
-const PLAYER_CATCH_BODY = (() => {
+function makeCatchBody(body) {
   const isArm = (x) => x <= 8 || x >= 19;   // 머리(9~18칸) 바깥은 글러브·팔
-  const armRow = PLAYER_BODY[9];            // 팔만 있는 줄
+  const armRow = body[9];                   // 팔만 있는 줄
   const top = [];
   for (let y = 0; y < 12 + CATCH_LIFT; y++) {
     let row = '';
     for (let x = 0; x < armRow.length; x++) {
-      if (isArm(x)) row += y < 9 ? PLAYER_BODY[y][x] : armRow[x];
-      else row += y < CATCH_LIFT ? '.' : PLAYER_BODY[y - CATCH_LIFT][x];
+      if (isArm(x)) row += y < 9 ? body[y][x] : armRow[x];
+      else row += y < CATCH_LIFT ? '.' : body[y - CATCH_LIFT][x];
     }
     top.push(row);
   }
-  return [...top, ...PLAYER_BODY.slice(12)];
-})();
+  return [...top, ...body.slice(12)];
+}
+
+// 캐릭터별 머리: PLAYER_BODY의 9~18칸, 0~11줄(10 × 12칸)을 바꿔 끼운다.
+// 헤드기어는 글러브 색(R)을 따라가고, 머리띠·트렁크 같은 다른 부위 색은 꾸미기에서 바꾼다.
+const HEAD_ART = {
+  boxer: [                // 기본 복서: 짧은 머리
+    '.KKKKKKKK.',
+    'KHHHHHHHHK',
+    'KHHHHHHHHK',
+    'KSHHHHHHSK',
+    'KSSSSSSSSK',
+    'KSKSSSSKSK',
+    'KSKSSSSKSK',
+    'KsSSSSSSsK',
+    'KSSSKKSSSK',
+    '.KsSSSSsK.',
+    '..KKKKKK..',
+    '.KKSSSSKK.',
+  ],
+  headgear: [             // 헤드기어 복서: 머리 전체를 감싸는 보호구
+    '.KKKKKKKK.',
+    'KRRRRRRRRK',
+    'KRWRRRRRRK',
+    'KRRRRRRRRK',
+    'KRSSSSSSRK',
+    'KRKSSSSKRK',
+    'KRKSSSSKRK',
+    'KrSSSSSSrK',
+    'KrSSKKSSrK',
+    '.KrSSSSrK.',
+    '..KKKKKK..',
+    '.KKSSSSKK.',
+  ],
+  longHair: [             // 긴 머리 복서: 옆머리가 턱까지 내려온다
+    '.KKKKKKKK.',
+    'KHHHHHHHHK',
+    'KHHHHHHHHK',
+    'KHHHHHHHHK',
+    'KHSSSSSSHK',
+    'KHKSSSSKHK',
+    'KHKSSSSKHK',
+    'KHSSSSSSHK',
+    'KHSSKKSSHK',
+    'KHHsSSsHHK',
+    '.KKKKKKKK.',
+    '.KKSSSSKK.',
+  ],
+  champion: [             // 챔피언: 금색 왕관
+    '.K..KK..K.',
+    'KYKKYYKKYK',
+    'KYYYYYYYYK',
+    'KyYRYYRYyK',
+    'KSSSSSSSSK',
+    'KSKSSSSKSK',
+    'KSKSSSSKSK',
+    'KsSSSSSSsK',
+    'KSSSKKSSSK',
+    '.KsSSSSsK.',
+    '..KKKKKK..',
+    '.KKSSSSKK.',
+  ],
+};
+
+function makeBody(head) {
+  return PLAYER_BODY.map((row, y) => (y < head.length ? row.slice(0, 9) + head[y] + row.slice(19) : row));
+}
 
 // 떨어지는 아이템: 18 × 18칸. 나쁜 아이템은 초록 외곽선(G)으로 구분한다.
 const ITEM_ART = {
@@ -577,7 +644,7 @@ const HEART_EMPTY_ART = HEART_ART.map((row) =>
 );
 
 // 글자 배열을 1칸 = 1px 캔버스로 미리 그려 둔다 (매 프레임 다시 그리지 않음)
-function makeSprite(rows, mirror = false) {
+function makeSprite(rows, mirror = false, palette = PALETTE) {
   const w = rows[0].length;
   const h = rows.length;
   const c = document.createElement('canvas');
@@ -587,7 +654,7 @@ function makeSprite(rows, mirror = false) {
   rows.forEach((row, y) => {
     if (row.length !== w) console.warn(`도트 그림 ${y}번째 줄 길이가 다릅니다: ${row.length}`);
     for (let x = 0; x < w; x++) {
-      const color = PALETTE[row[x]];
+      const color = palette[row[x]];
       if (!color) continue;
       g.fillStyle = color;
       g.fillRect(mirror ? w - 1 - x : x, y, 1, 1);
@@ -598,10 +665,7 @@ function makeSprite(rows, mirror = false) {
 
 const Assets = {
   sprites: {
-    playerStand: makeSprite([...PLAYER_BODY, ...LEGS_STAND]),
-    playerStepL: makeSprite([...PLAYER_BODY, ...LEGS_STEP]),
-    playerStepR: makeSprite([...PLAYER_BODY, ...LEGS_STEP], true),
-    playerCatch: makeSprite([...PLAYER_CATCH_BODY, ...LEGS_STAND]),
+    // 캐릭터 그림(playerStand·playerStepL·playerStepR·playerCatch)은 아래 buildPlayerSprites로 채운다
     heart: makeSprite(HEART_ART),
     heartEmpty: makeSprite(HEART_EMPTY_ART),
     // 아이템 그림: ITEM_ART의 이름(id) 그대로 사용
@@ -611,8 +675,7 @@ const Assets = {
   },
 
   // 도트 그림을 PIXEL배로 키워 그린다. 위치를 도트 격자에 맞춰 반쯤 걸친 도트가 없게 한다.
-  draw(sprite, x, y) {
-    const p = CONFIG.PIXEL;
+  draw(sprite, x, y, p = CONFIG.PIXEL) {
     ctx.drawImage(sprite,
       Math.round(x / p) * p, Math.round(y / p) * p,
       sprite.width * p, sprite.height * p);
@@ -681,9 +744,22 @@ const background = (() => {
   return c;
 })();
 
+// 캐릭터 그림 네 장(서기·걷기 2장·받기)을 만든다. palette로 피부·머리·글러브·트렁크 색을 바꾼다.
+function buildPlayerSprites(charId, palette = PALETTE) {
+  const body = makeBody(HEAD_ART[charId]);
+  return {
+    playerStand: makeSprite([...body, ...LEGS_STAND], false, palette),
+    playerStepL: makeSprite([...body, ...LEGS_STEP], false, palette),
+    playerStepR: makeSprite([...body, ...LEGS_STEP], true, palette),
+    playerCatch: makeSprite([...makeCatchBody(body), ...LEGS_STAND], false, palette),
+  };
+}
+Object.assign(Assets.sprites, buildPlayerSprites('boxer'));
+
 // ============================================================
 // Game: 상태와 갱신
 // ============================================================
+
 const player = {
   x: CONFIG.WIDTH / 2,                                  // 발 가운데 x
   y: CONFIG.HEIGHT - CONFIG.PLAYER_BOTTOM_MARGIN,       // 발 위치 y
@@ -816,8 +892,14 @@ function endGame(reason) {
   game.over = true;
   game.endReason = reason;
   player.moving = false;
+  const bestBefore = Record.best;
   game.newRecord = Record.submit(game.score);
   Share.prepare();   // 공유 버튼을 누르는 순간 바로 공유 창을 열 수 있게 이미지를 미리 만든다
+  const unlocked = Look.newlyUnlocked(bestBefore, Record.best);
+  if (unlocked.length) {
+    const more = unlocked.length > 1 ? ` 외 ${unlocked.length - 1}개` : '';
+    Share.show(`새로 열림: ${unlocked[0]}${more}`, CONFIG.UNLOCK_MESSAGE_TIME);
+  }
   setScreen('result');
   Sound.play('end', reason);
   Haptics.play('end');
@@ -1264,6 +1346,153 @@ const Record = {
 Record.load();
 
 // ============================================================
+// Look: 캐릭터 선택과 색 꾸미기
+// 최고 점수가 unlock 이상이면 열린다. 겉모습만 바뀌고 능력은 모두 같다.
+// ============================================================
+const CHARACTERS = [
+  { id: 'boxer',    name: '기본 복서',     unlock: 0 },
+  { id: 'headgear', name: '헤드기어 복서', unlock: 300 },
+  { id: 'longHair', name: '긴 머리 복서',  unlock: 600 },
+  { id: 'champion', name: '챔피언',        unlock: 1000 },
+];
+
+// 부위별 색. keys는 PALETTE에서 바꿀 글자(밝은 색, 그림자 색 순서)
+const LOOK_PARTS = [
+  { id: 'skin', name: '피부', keys: ['S', 's'], options: [
+    { name: '밝은', colors: ['#F2C29B', '#C98F6B'], unlock: 0 },
+    { name: '중간', colors: ['#DDA272', '#AD7149'], unlock: 0 },
+    { name: '구릿빛', colors: ['#B5774C', '#875231'], unlock: 0 },
+    { name: '짙은', colors: ['#7A4E32', '#55331F'], unlock: 0 },
+  ] },
+  { id: 'hair', name: '머리', keys: ['H'], options: [
+    { name: '갈색', colors: ['#3B2A20'], unlock: 0 },
+    { name: '검정', colors: ['#2A2530'], unlock: 0 },
+    { name: '금발', colors: ['#E8C04A'], unlock: 0 },
+    { name: '은색', colors: ['#B8BEC8'], unlock: 0 },
+  ] },
+  { id: 'gloves', name: '글러브', keys: ['R', 'r'], options: [
+    { name: '빨간', colors: ['#E53935', '#A72323'], unlock: 0 },
+    { name: '파란', colors: ['#1E88E5', '#1259A8'], unlock: 0 },
+    { name: '검은', colors: ['#4A4A5A', '#30303C'], unlock: 200 },
+    { name: '금색', colors: ['#FFC107', '#C79100'], unlock: 800 },
+  ] },
+  { id: 'trunks', name: '트렁크', keys: ['B', 'b'], options: [
+    { name: '빨간', colors: ['#E53935', '#A72323'], unlock: 0 },
+    { name: '파란', colors: ['#1E88E5', '#1259A8'], unlock: 0 },
+    { name: '검은', colors: ['#4A4A5A', '#30303C'], unlock: 200 },
+    { name: '금색', colors: ['#FFC107', '#C79100'], unlock: 800 },
+  ] },
+];
+
+// 잠긴 캐릭터 미리보기: 모든 색을 어둡게 칠한 실루엣
+const SILHOUETTE_PALETTE = Object.fromEntries(
+  Object.keys(PALETTE).map((k) => [k, k === 'K' ? '#0B0F16' : '#2A3344'])
+);
+
+const Look = {
+  char: 0,             // CHARACTERS 번호
+  skin: 0,             // LOOK_PARTS별 고른 색 번호
+  hair: 0,
+  gloves: 0,
+  trunks: 1,           // 기본은 빨간 글러브 + 파란 트렁크
+
+  isUnlocked(item) {
+    return Record.best >= item.unlock;
+  },
+
+  load() {
+    try {
+      const v = JSON.parse(localStorage.getItem(CONFIG.STORAGE_LOOK));
+      if (v && typeof v === 'object') {
+        const ok = (list, i) => Number.isInteger(i) && list[i] && this.isUnlocked(list[i]);
+        if (ok(CHARACTERS, v.char)) this.char = v.char;
+        LOOK_PARTS.forEach((part) => { if (ok(part.options, v[part.id])) this[part.id] = v[part.id]; });
+      }
+    } catch (e) { /* 저장된 값이 없거나 깨졌으면 기본값 */ }
+    this.apply();
+  },
+
+  save() {
+    const v = { char: this.char };
+    LOOK_PARTS.forEach((part) => { v[part.id] = this[part.id]; });
+    try { localStorage.setItem(CONFIG.STORAGE_LOOK, JSON.stringify(v)); } catch (e) { /* 무시 */ }
+  },
+
+  palette() {
+    const p = { ...PALETTE };
+    LOOK_PARTS.forEach((part) => {
+      const colors = part.options[this[part.id]].colors;
+      part.keys.forEach((k, i) => { p[k] = colors[i]; });
+    });
+    return p;
+  },
+
+  // 고른 모습으로 캐릭터 그림을 다시 만든다
+  apply() {
+    Object.assign(Assets.sprites, buildPlayerSprites(CHARACTERS[this.char].id, this.palette()));
+  },
+
+  setChar(i) {
+    if (!this.isUnlocked(CHARACTERS[i])) return;
+    this.char = i;
+    this.save();
+    this.apply();
+  },
+
+  // 색 칸을 눌렀을 때. 잠긴 색이면 열리는 점수를 알려 준다.
+  pickColor(partIndex, i) {
+    const part = LOOK_PARTS[partIndex];
+    const opt = part.options[i];
+    if (!this.isUnlocked(opt)) {
+      Share.show(`최고 점수 ${opt.unlock.toLocaleString()}점에서 열려요`);
+      return;
+    }
+    this[part.id] = i;
+    this.save();
+    this.apply();
+  },
+
+  // 최고 점수가 before → after로 오르며 새로 열린 것들의 이름
+  newlyUnlocked(before, after) {
+    const opened = (item) => item.unlock > before && item.unlock <= after;
+    const names = CHARACTERS.filter(opened).map((c) => c.name);
+    LOOK_PARTS.forEach((part) => {
+      part.options.filter(opened).forEach((opt) => names.push(`${opt.name} ${part.name}`));
+    });
+    return names;
+  },
+};
+Look.load();
+
+// 캐릭터 화면에서 보고 있는 캐릭터 (잠긴 캐릭터도 넘겨 볼 수 있다)
+const Custom = {
+  view: 0,
+  silhouettes: {},     // 잠긴 캐릭터 실루엣 그림 (처음 볼 때 만든다)
+
+  open() {
+    this.view = Look.char;
+    setScreen('custom');
+  },
+
+  close() {
+    setScreen('title');
+  },
+
+  step(d) {
+    this.view = (this.view + d + CHARACTERS.length) % CHARACTERS.length;
+    Look.setChar(this.view);   // 열린 캐릭터면 바로 고른다
+  },
+
+  // 미리보기에 쓸 그림 네 장
+  sprites() {
+    const c = CHARACTERS[this.view];
+    if (Look.isUnlocked(c)) return Assets.sprites;
+    if (!this.silhouettes[c.id]) this.silhouettes[c.id] = buildPlayerSprites(c.id, SILHOUETTE_PALETTE);
+    return this.silhouettes[c.id];
+  },
+};
+
+// ============================================================
 // Share: 결과 공유 (PRD 7-1항, 7항 F8)
 // 1) 결과 카드 이미지를 만들고 2) 이미지 공유를 지원하면 공유 창을 열고
 // 3) 지원하지 않으면 "이미지 저장 / 문구 복사" 선택 창을 띄운다.
@@ -1397,9 +1626,9 @@ const Share = {
     }
   },
 
-  show(message) {
+  show(message, time = CONFIG.MESSAGE_TIME) {
     this.message = message;
-    this.messageTime = CONFIG.MESSAGE_TIME;
+    this.messageTime = time;
   },
 
   update(dt) {
@@ -1638,8 +1867,41 @@ const inRect = (b, x, y, pad = 0) =>
 // 공유 선택 창 버튼 위치 (위에 카드 미리보기가 있다)
 const SHARE_BUTTON_Y = [700, 810, 920, 1030];
 
+// 캐릭터 화면 배치: 미리보기 → 이름(◀ ▶) → 부위별 색 4줄 → 완료
+const CUSTOM_LAYOUT = {
+  previewY: 196,       // 미리보기 위쪽 (도트 한 칸 = 8px로 크게)
+  previewPixel: 8,
+  nameY: 492,          // 이름 줄(화살표 버튼) 위쪽
+  rowY: 650,           // 첫 색 줄 위쪽
+  rowStep: 100,
+  swatch: 76,          // 색 칸 크기
+  swatchGap: 24,
+  side: 72,            // 좌우 여백
+};
+const swatchX = (i) => {
+  const L = CUSTOM_LAYOUT;
+  return CONFIG.WIDTH - L.side - 4 * L.swatch - 3 * L.swatchGap + i * (L.swatch + L.swatchGap);
+};
+const ARROW_BUTTONS = [
+  { x: CUSTOM_LAYOUT.side, y: CUSTOM_LAYOUT.nameY, w: 96, h: 96, dir: -1 },
+  { x: CONFIG.WIDTH - CUSTOM_LAYOUT.side - 96, y: CUSTOM_LAYOUT.nameY, w: 96, h: 96, dir: 1 },
+];
+
 const BUTTONS = {
-  title: [centerButton('시작', 948, startGame, true)],
+  title: [
+    { label: '시작', x: 100, y: 948, w: 300, h: BUTTON_H, action: startGame, primary: true },
+    { label: '캐릭터', x: 420, y: 948, w: 200, h: BUTTON_H, action: () => Custom.open() },
+  ],
+  // custom: true인 버튼은 drawCustom이 직접 그린다 (화살표, 색 칸)
+  custom: [
+    centerButton('완료', 1090, () => Custom.close(), true),
+    ...ARROW_BUTTONS.map((b) => ({ ...b, custom: true, action: () => Custom.step(b.dir) })),
+    ...LOOK_PARTS.flatMap((part, r) => part.options.map((opt, i) => ({
+      x: swatchX(i), y: CUSTOM_LAYOUT.rowY + r * CUSTOM_LAYOUT.rowStep,
+      w: CUSTOM_LAYOUT.swatch, h: CUSTOM_LAYOUT.swatch,
+      custom: true, action: () => Look.pickColor(r, i),
+    }))),
+  ],
   paused: [
     centerButton('계속하기', 600, resumeGame, true),
     centerButton('처음으로', 730, goTitle),
@@ -1718,6 +1980,12 @@ const UI = {
       Sound.toggle();
       return true;
     }
+    // 캐릭터 화면: ←/→ = 캐릭터 넘기기, Esc = 완료
+    if (Screen.state === 'custom') {
+      const dir = { ArrowLeft: -1, a: -1, A: -1, ArrowRight: 1, d: 1, D: 1 }[key];
+      if (dir) { Sound.play('click'); Custom.step(dir); return true; }
+      if (key === 'Escape') { Custom.close(); return true; }
+    }
     if (key === 'Escape' || key === 'p' || key === 'P') {
       if (Screen.state === 'play') { pauseGame(); return true; }
       if (Screen.state === 'paused') { resumeGame(); return true; }
@@ -1767,7 +2035,7 @@ function drawButtons() {
   const buttons = currentButtons();
   if (!buttons) return;
   ctx.globalAlpha = UI.buttonsReady() ? 1 : 0.4;
-  buttons.forEach(drawButton);
+  buttons.filter((b) => !b.custom).forEach(drawButton);
   ctx.globalAlpha = 1;
 }
 
@@ -1882,6 +2150,91 @@ function drawResult() {
   drawText(`× ${badCount}`, cx + 20, badY, 28, col.warning, 'left');
 }
 
+// 캐릭터 화면: 걷는 미리보기, 캐릭터 넘기기, 부위별 색 칸
+function drawCustom() {
+  const col = CONFIG.COLORS;
+  const L = CUSTOM_LAYOUT;
+  const p = CONFIG.PIXEL;
+  const cx = CONFIG.WIDTH / 2;
+  const c = CHARACTERS[Custom.view];
+  const unlocked = Look.isUnlocked(c);
+
+  drawText('캐릭터', cx, 150, 60, col.text);
+
+  // 미리보기: 서기 → 왼발 → 서기 → 오른발 순서로 제자리걸음
+  const s = Custom.sprites();
+  const frames = [s.playerStand, s.playerStepL, s.playerStand, s.playerStepR];
+  const sprite = frames[Math.floor(Screen.time / 0.25) % 4];
+  const pw = sprite.width * L.previewPixel;
+  const ph = sprite.height * L.previewPixel;
+  Assets.drawShadow(cx, L.previewY + ph, 48);
+  Assets.draw(sprite, cx - pw / 2, L.previewY, L.previewPixel);
+  if (!unlocked) drawLockIcon(cx, L.previewY + ph / 2, 3);
+
+  // 화살표 버튼: 도트 삼각형
+  ARROW_BUTTONS.forEach((b) => {
+    drawButton({ ...b, label: '', primary: false });
+    ctx.fillStyle = col.text;
+    const midY = b.y + b.h / 2 - p;
+    for (let i = 0; i < 5; i++) {
+      // 꼭짓점(높이 1칸)에서 밑변(높이 9칸)으로
+      const x = b.x + b.w / 2 + (b.dir < 0 ? (i - 3) : (2 - i)) * p;
+      ctx.fillRect(x, midY - i * p, p, (2 * i + 1) * p);
+    }
+  });
+  drawText(c.name, cx, L.nameY + 62, 40, col.text);
+  if (unlocked) {
+    drawText(`${Custom.view + 1} / ${CHARACTERS.length}`, cx, L.nameY + 132, 24, col.text);
+  } else {
+    drawText(`최고 점수 ${c.unlock.toLocaleString()}점에서 열려요`, cx, L.nameY + 132, 24, col.warning);
+  }
+
+  // 부위별 색 칸
+  LOOK_PARTS.forEach((part, r) => {
+    const y = L.rowY + r * L.rowStep;
+    drawText(part.name, L.side, y + L.swatch / 2 + 12, 30, col.text, 'left');
+    part.options.forEach((opt, i) => {
+      const x = swatchX(i);
+      const selected = Look[part.id] === i;
+      if (selected) {
+        // 고른 색: 어두운 테두리 바깥에 강조색 테두리 (금색 칸에서도 보이게 사이를 띄운다)
+        ctx.fillStyle = col.accent;
+        ctx.fillRect(x - 3 * p, y - 3 * p, L.swatch + 6 * p, L.swatch + 6 * p);
+      }
+      ctx.fillStyle = col.textShadow;
+      ctx.fillRect(x - p, y - p, L.swatch + 2 * p, L.swatch + 2 * p);
+      ctx.fillStyle = opt.colors[0];
+      ctx.fillRect(x, y, L.swatch, L.swatch);
+      if (opt.colors[1]) {
+        ctx.fillStyle = opt.colors[1];                                 // 아래쪽 그림자 색
+        ctx.fillRect(x, y + L.swatch - 4 * p, L.swatch, 4 * p);
+      }
+      if (!Look.isUnlocked(opt)) {
+        ctx.fillStyle = 'rgba(8, 12, 18, 0.65)';
+        ctx.fillRect(x, y, L.swatch, L.swatch);
+        drawLockIcon(x + L.swatch / 2, y + L.swatch / 2, 1);
+      }
+    });
+  });
+}
+
+// 자물쇠 아이콘 (도트 8 × 11칸). (cx, cy)가 가운데, size는 도트 배율
+function drawLockIcon(cx, cy, size) {
+  const p = CONFIG.PIXEL * size;
+  const ox = cx - 4 * p;
+  const oy = cy - 5.5 * p;
+  const px = (x, y, w = 1, h = 1) => ctx.fillRect(ox + x * p, oy + y * p, w * p, h * p);
+  ctx.fillStyle = CONFIG.COLORS.textShadow;
+  px(1, 0, 6, 6);                                    // 고리 외곽
+  px(0, 4, 8, 7);                                    // 몸통 외곽
+  ctx.fillStyle = CONFIG.COLORS.text;
+  px(2, 1, 4, 1); px(2, 1, 1, 4); px(5, 1, 1, 4);   // 고리
+  px(1, 5, 6, 5);                                    // 몸통
+  ctx.fillStyle = CONFIG.COLORS.textShadow;
+  px(3, 6, 2, 2);                                    // 열쇠 구멍
+  px(3, 8, 1, 1);
+}
+
 // 공유 선택 창: 카드 미리보기 + 카카오톡·이미지 저장·문구 복사·돌아가기
 function drawSharePanel() {
   const cx = CONFIG.WIDTH / 2;
@@ -1902,7 +2255,7 @@ function drawSharePanel() {
 function drawShareMessage() {
   if (Share.messageTime <= 0) return;
   ctx.globalAlpha = Math.min(1, Share.messageTime / 0.3);
-  const w = 440;
+  const w = 560;
   const h = 72;
   const x = (CONFIG.WIDTH - w) / 2;
   const y = 1190;
@@ -1973,6 +2326,14 @@ function render() {
 }
 
 function renderScene(state) {
+
+  if (state === 'custom') {
+    dim();
+    drawCustom();
+    drawButtons();
+    drawShareMessage();
+    return;
+  }
 
   // 시작 화면: 어둡게 덮은 링 위에 캐릭터만 밝게 보여 준다
   if (state === 'title') {
