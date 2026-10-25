@@ -130,6 +130,9 @@ const CONFIG = {
   BGM_BPM: 132,                  // 배경음악 빠르기
   STORAGE_MUTED: 'punchCatch.muted',   // 소리 끄기 설정을 저장하는 localStorage 키
   STORAGE_LOOK: 'punchCatch.look',     // 고른 캐릭터·색을 저장하는 localStorage 키
+  STORAGE_SECRET: 'punchCatch.beastbox', // 비밀 복서를 찾았는지 저장하는 localStorage 키
+  SECRET_TAPS: 5,                // 시작 화면 제목을 이만큼 빠르게 누르면 비밀 복서가 열린다
+  SECRET_TAP_GAP: 1.2,           // 연속 누르기로 치는 간격(초)
 
   // 최고 점수·공유 (PRD 7-1항, 7항 F7·F8)
   STORAGE_BEST: 'punchCatch.best',     // 최고 점수를 저장하는 localStorage 키
@@ -331,6 +334,7 @@ const PALETTE = {
 
   Y: '#FFC107',   // 금색·노랑 (벨트 버클, 치즈, 스프링클)
   y: '#C79100',   // 금색 그림자
+  V: '#F47732',   // 비스트박스 복서 머리띠 (주황)
   J: '#FFE066',   // 줄넘기 (밝은 노랑, 어두운 배경에서 잘 보이게)
   g: '#1A1220',   // 줄넘기 테두리 (다른 아이템과 같은 짙은 외곽선)
   e: '#C8CED6',   // 복싱화·글러브 손목 그림자 (밝은 회색)
@@ -459,6 +463,20 @@ const HEAD_ART = {
     'KSKSSSSKSK',
     'KsSSSSSSsK',
     'KSSSKKSSSK',
+    '.KsSSSSsK.',
+    '..KKKKKK..',
+    '.KKSSSSKK.',
+  ],
+  beast: [                // 비스트박스 복서(비밀): 뻗친 머리, 머리띠, 매서운 눈썹
+    '.K.K..K.K.',
+    'KHKHKKHKHK',
+    'KHHHHHHHHK',
+    'KVVVVVVVVK',
+    'KSKKSSKKSK',
+    'KSKSSSSKSK',
+    'KSKSSSSKSK',
+    'KsSSSSSSsK',
+    'KSSKKKKSSK',
     '.KsSSSSsK.',
     '..KKKKKK..',
     '.KKSSSSKK.',
@@ -727,14 +745,34 @@ const background = (() => {
     g.fillStyle = col.ropeDark;  g.fillRect(0, y + 2, w, 1);
   }
 
-  // 양쪽 코너 기둥
-  for (const x of [2, w - 6]) {
-    g.fillStyle = col.postDark; g.fillRect(x, 6, 4, 34);
-    g.fillStyle = col.post;     g.fillRect(x, 6, 3, 34);
+  // 양쪽 코너 기둥 (안쪽에 작은 글씨가 들어가도록 밝은 면 5칸)
+  for (const x of [2, w - 8]) {
+    g.fillStyle = col.postDark; g.fillRect(x, 6, 6, 34);
+    g.fillStyle = col.post;     g.fillRect(x, 6, 5, 34);
     g.fillStyle = col.textShadow;
-    g.fillRect(x - 1, 5, 6, 1);
-    g.fillRect(x - 1, 40, 6, 1);
+    g.fillRect(x - 1, 5, 8, 1);
+    g.fillRect(x - 1, 40, 8, 1);
   }
+
+  // 코너 기둥에 세로로 새긴 작은 글씨: 왼쪽 BEAST, 오른쪽 BOX (체육관 이름 이스터 에그)
+  const MINI_FONT = {
+    B: ['110', '101', '110', '101', '110'],
+    E: ['111', '100', '110', '100', '111'],
+    A: ['010', '101', '111', '101', '101'],
+    S: ['011', '100', '010', '001', '110'],
+    T: ['111', '010', '010', '010', '010'],
+    O: ['010', '101', '101', '101', '010'],
+    X: ['101', '101', '010', '101', '101'],
+  };
+  g.fillStyle = col.postDark;
+  [['BEAST', 3], ['BOX', w - 7]].forEach(([word, x]) => {
+    const top = 6 + Math.floor((34 - (word.length * 6 - 1)) / 2);   // 기둥 가운데
+    [...word].forEach((ch, i) => {
+      MINI_FONT[ch].forEach((row, dy) => {
+        [...row].forEach((bit, dx) => { if (bit === '1') g.fillRect(x + dx, top + i * 6 + dy, 1, 1); });
+      });
+    });
+  });
 
   // 캐릭터가 서는 링 바닥 가장자리
   const floorY = Math.round((CONFIG.HEIGHT - CONFIG.PLAYER_BOTTOM_MARGIN) / p) + 6;
@@ -1347,6 +1385,37 @@ const Record = {
 Record.load();
 
 // ============================================================
+// Secret: 시작 화면 제목을 빠르게 SECRET_TAPS번 누르면 비밀 복서가 열린다 (이스터 에그)
+// ============================================================
+const Secret = {
+  found: false,
+  taps: 0,
+  lastTap: -Infinity,
+
+  load() {
+    try { this.found = localStorage.getItem(CONFIG.STORAGE_SECRET) === '1'; } catch (e) { /* 무시 */ }
+  },
+
+  tap() {
+    const now = performance.now() / 1000;
+    this.taps = now - this.lastTap <= CONFIG.SECRET_TAP_GAP ? this.taps + 1 : 1;
+    this.lastTap = now;
+    if (this.taps < CONFIG.SECRET_TAPS) return;
+    this.taps = 0;
+    if (this.found) {
+      Share.show('PUNCH LIKE A BEAST!');
+      return;
+    }
+    this.found = true;
+    try { localStorage.setItem(CONFIG.STORAGE_SECRET, '1'); } catch (e) { /* 무시 */ }
+    Sound.play('levelUp');
+    Haptics.play('levelUp');
+    Share.show('BEASTBOX! 비밀 복서가 열렸어요', CONFIG.UNLOCK_MESSAGE_TIME);
+  },
+};
+Secret.load();
+
+// ============================================================
 // Look: 캐릭터 선택과 색 꾸미기
 // 최고 점수가 unlock 이상이면 열린다. 겉모습만 바뀌고 능력은 모두 같다.
 // ============================================================
@@ -1355,6 +1424,8 @@ const CHARACTERS = [
   { id: 'tiedHair', name: '장발 복서',     unlock: 300 },
   { id: 'headgear', name: '헤드기어 복서', unlock: 600 },
   { id: 'champion', name: '챔피언',        unlock: 1000 },
+  // 비밀 캐릭터는 맨 끝에 두고, 찾기 전에는 캐릭터 화면에 나오지 않는다
+  { id: 'beast',    name: '비스트박스 복서', unlock: Infinity, secret: true },
 ];
 
 // 부위별 색. keys는 PALETTE에서 바꿀 글자(밝은 색, 그림자 색 순서)
@@ -1398,7 +1469,7 @@ const Look = {
   trunks: 1,           // 기본은 빨간 글러브 + 파란 트렁크
 
   isUnlocked(item) {
-    return Record.best >= item.unlock;
+    return item.secret ? Secret.found : Record.best >= item.unlock;
   },
 
   load() {
@@ -1479,8 +1550,14 @@ const Custom = {
     setScreen('title');
   },
 
+  // 캐릭터 화면에 나오는 캐릭터 수 (찾지 못한 비밀 캐릭터는 뺀다)
+  count() {
+    return CHARACTERS.filter((c) => !c.secret || Secret.found).length;
+  },
+
   step(d) {
-    this.view = (this.view + d + CHARACTERS.length) % CHARACTERS.length;
+    const n = this.count();
+    this.view = (this.view + d + n) % n;
     Look.setChar(this.view);   // 열린 캐릭터면 바로 고른다
   },
 
@@ -1865,6 +1942,9 @@ const SOUND_BUTTONS = {
 const inRect = (b, x, y, pad = 0) =>
   x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad;
 
+// 시작 화면 제목(펀치 캐치 / PUNCH CATCH) 영역: 비밀 복서 이스터 에그
+const TITLE_TAP_AREA = { x: 100, y: 200, w: 520, h: 160 };
+
 // 공유 선택 창 버튼 위치 (위에 카드 미리보기가 있다)
 const SHARE_BUTTON_Y = [700, 810, 920, 1030];
 
@@ -1970,6 +2050,8 @@ const UI = {
     if (hit) {
       Sound.play('click');
       hit.action();
+    } else if (Screen.state === 'title' && inRect(TITLE_TAP_AREA, x, y)) {
+      Secret.tap();
     }
     return true;                                   // 버튼 밖을 눌러도 메뉴 화면에서는 무시
   },
@@ -2185,7 +2267,7 @@ function drawCustom() {
   });
   drawText(c.name, cx, L.nameY + 62, 40, col.text);
   if (unlocked) {
-    drawText(`${Custom.view + 1} / ${CHARACTERS.length}`, cx, L.nameY + 132, 24, col.text);
+    drawText(`${Custom.view + 1} / ${Custom.count()}`, cx, L.nameY + 132, 24, col.text);
   } else {
     drawText(`최고 점수 ${c.unlock.toLocaleString()}점에서 열려요`, cx, L.nameY + 132, 24, col.warning);
   }
@@ -2343,6 +2425,7 @@ function renderScene(state) {
     drawTitle();
     drawButtons();
     drawSoundButton();
+    drawShareMessage();
     return;
   }
 
