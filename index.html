@@ -328,6 +328,8 @@ const PALETTE = {
   W: '#FFFFFF',   // 흰색 (손목 띠, 허리띠, 하이라이트)
   B: '#1E88E5',   // 파랑 (트렁크, 벨트 보석)
   b: '#1259A8',   // 파랑 그림자
+  N: '#1E88E5',   // 헤드기어 복서2 보호구 (꾸미기와 상관없이 파랑)
+  n: '#1259A8',   // 헤드기어 복서2 보호구 그림자
   Y: '#FFC107',   // 금색·노랑 (벨트 버클, 치즈, 스프링클)
   y: '#C79100',   // 금색 그림자
   J: '#FFE066',   // 줄넘기 (밝은 노랑, 어두운 배경에서 잘 보이게)
@@ -418,7 +420,7 @@ function makeCatchBody(body) {
 }
 
 // 캐릭터별 머리: PLAYER_BODY의 9~18칸, 0~11줄(10 × 12칸)을 바꿔 끼운다.
-// 헤드기어는 글러브 색(R)을 따라가고, 머리띠·트렁크 같은 다른 부위 색은 꾸미기에서 바꾼다.
+// 헤드기어는 글러브 색(R)을 따라가고, 헤드기어2는 늘 파랑(N)이다. 다른 부위 색은 꾸미기에서 바꾼다.
 const HEAD_ART = {
   boxer: [                // 기본 복서: 짧은 머리
     '.KKKKKKKK.',
@@ -448,18 +450,18 @@ const HEAD_ART = {
     '..KKKKKK..',
     '.KKSSSSKK.',
   ],
-  longHair: [             // 긴 머리 복서: 옆머리가 턱까지 내려온다
+  headgear2: [            // 헤드기어 복서2: 헤드기어 복서와 같은 모양, 파란 보호구
     '.KKKKKKKK.',
-    'KHHHHHHHHK',
-    'KHHHHHHHHK',
-    'KHHHHHHHHK',
-    'KHSSSSSSHK',
-    'KHKSSSSKHK',
-    'KHKSSSSKHK',
-    'KHSSSSSSHK',
-    'KHSSKKSSHK',
-    'KHHsSSsHHK',
-    '.KKKKKKKK.',
+    'KNNNNNNNNK',
+    'KNWNNNNNNK',
+    'KNNNNNNNNK',
+    'KNSSSSSSNK',
+    'KNKSSSSKNK',
+    'KNKSSSSKNK',
+    'KnSSSSSSnK',
+    'KnSSKKSSnK',
+    '.KnSSSSnK.',
+    '..KKKKKK..',
     '.KKSSSSKK.',
   ],
   champion: [             // 챔피언: 금색 왕관
@@ -1352,7 +1354,7 @@ Record.load();
 const CHARACTERS = [
   { id: 'boxer',    name: '기본 복서',     unlock: 0 },
   { id: 'headgear', name: '헤드기어 복서', unlock: 300 },
-  { id: 'longHair', name: '긴 머리 복서',  unlock: 600 },
+  { id: 'headgear2', name: '헤드기어 복서2', unlock: 600 },
   { id: 'champion', name: '챔피언',        unlock: 1000 },
 ];
 
